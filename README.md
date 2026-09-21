@@ -32,6 +32,7 @@ Vivado vectorless 3.498 W estimate is not a measured board result.
 - `alexnet/tb/` and `alexnet/scripts/`: XSim and Vivado regressions;
 - `alexnet/cpp/`: bit-exact C++ golden model;
 - `alexnet/stages/03_kv260_m8n126_graph/`: final KV260 integration flow;
+- `docs/`: architecture plan and development roadmap;
 - `rtl/axi_dma_simple_master.sv`: shared AXI DMA master used by the integrated
   top;
 - `release/`: the timing-clean bitstream and fixed hardware handoff.
