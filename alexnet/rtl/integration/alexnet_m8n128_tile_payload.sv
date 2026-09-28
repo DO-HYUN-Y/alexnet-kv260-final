@@ -94,6 +94,7 @@ module alexnet_m8n128_tile_payload #(
 
   typedef enum logic [3:0] {
     ST_IDLE,
+    ST_VALIDATE,
     ST_CLEAR,
     ST_ISSUE,
     ST_FLUSH,
@@ -113,6 +114,11 @@ module alexnet_m8n128_tile_payload #(
   logic mode_split_q;
   logic [7:0] bank_enable_q;
   logic [15:0] n_lane_mask_q [0:7];
+  // Cache the non-empty status of every physical N8 slice when the command
+  // is accepted.  Result sequencing only needs this one-bit predicate; using
+  // the full lane-mask array there creates a deep selected-mask reduction on
+  // the state-transition path.
+  logic [15:0] slice_has_lanes_q;
   logic [15:0] n_base_q;
   logic [7:0] n_count_q;
   logic [12:0] m_base_q;
@@ -140,6 +146,10 @@ module alexnet_m8n128_tile_payload #(
   logic [7:0] requant_cfg_relu_q;
 
   logic group_ce [0:1];
+  // Keep the global DSP enable off the decoded state-Q path.  Each cluster
+  // owns a registered copy so a state transition does not traverse a LUT and
+  // a fabric-wide clock buffer before reaching thousands of DSP CEP pins.
+  (* keep = "true", dont_touch = "true" *) logic sa_ce_q [0:1];
   logic signed [7:0] group_act_lo [0:1][0:3];
   logic signed [7:0] group_act_hi [0:1][0:3];
   logic group_issue_valid [0:1];
@@ -177,10 +187,16 @@ module alexnet_m8n128_tile_payload #(
   logic command_fire, issue_fire, issue_metadata_ok;
   logic parameter_fire, requant_cfg_fire, requant_ingress_fire;
   logic result_fire;
-  logic command_descriptor_ok, continuation_ok;
+  logic command_descriptor_base_ok, command_descriptor_base_ok_q;
+  logic registered_descriptor_ok, continuation_ok;
   logic command_effective_split;
   logic [7:0] command_effective_bank_enable;
-  logic [7:0] command_logical_n_count;
+  logic command_mode_split_n64_q;
+  logic [4:0] command_bank_lane_count [0:7];
+  logic [4:0] command_bank_lane_count_q [0:7];
+  logic [5:0] registered_count_pair [0:3];
+  logic [6:0] registered_count_quad [0:1];
+  logic [7:0] registered_logical_n_count;
   logic [15:0] expected_patch_mask;
   logic [7:0] expected_weight_bank_enable;
   logic [2:0] selected_bank;
@@ -201,6 +217,29 @@ module alexnet_m8n128_tile_payload #(
   assign command_fire = command_valid && command_ready;
   assign busy = state_q != ST_IDLE;
   assign accumulator_open = accum_open_q;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      sa_ce_q[0] <= 1'b0;
+      sa_ce_q[1] <= 1'b0;
+    end else if (state_q == ST_VALIDATE && registered_descriptor_ok) begin
+      sa_ce_q[0] <= 1'b1;
+      sa_ce_q[1] <= 1'b1;
+    end else if ((state_q == ST_FLUSH &&
+                 flush_count_q + 1'b1 >= PIPE_FLUSH_CYCLES) ||
+                (state_q == ST_RESULT && result_fire &&
+                 physical_last_slice) ||
+                (state_q == ST_DISCARD && physical_last_slice) ||
+                (state_q == ST_ISSUE && issue_fire &&
+                 !issue_metadata_ok) ||
+                (state_q == ST_PARAM_WAIT && parameter_fire &&
+                 (parameter_n_base != selected_n_base ||
+                  parameter_context_tag != weight_context_tag_q)) ||
+                state_q == ST_ERROR) begin
+      sa_ce_q[0] <= 1'b0;
+      sa_ce_q[1] <= 1'b0;
+    end
+  end
 
   assign patch_ready = state_q == ST_ISSUE && weight_valid;
   assign weight_ready = state_q == ST_ISSUE && patch_valid;
@@ -240,13 +279,10 @@ module alexnet_m8n128_tile_payload #(
                                     command_group1_m_count == 0 ?
                                     (command_bank_enable & 8'h0f) :
                                     command_bank_enable;
-    command_logical_n_count = '0;
     for (int bank = 0; bank < 8; bank++) begin
-      if ((!command_mode_split_n64 || bank < 4) &&
-          command_bank_enable[bank]) begin
-        for (int lane = 0; lane < 16; lane++)
-          command_logical_n_count += command_n_lane_mask[bank][lane];
-      end
+      command_bank_lane_count[bank] = '0;
+      for (int lane = 0; lane < 16; lane++)
+        command_bank_lane_count[bank] += command_n_lane_mask[bank][lane];
     end
 
     expected_patch_mask = '0;
@@ -286,18 +322,36 @@ module alexnet_m8n128_tile_payload #(
          command_group0_m_count == accum_group_m_count_q[0] &&
          command_group1_m_count == accum_group_m_count_q[1] &&
          command_tile_tag == accum_tile_tag_q);
-    command_descriptor_ok = command_k_count >= 1 &&
+    command_descriptor_base_ok = command_k_count >= 1 &&
         command_k_count <= 4096 && command_bank_enable != 0 &&
         command_n_count >= 1 && command_n_count <= 128 &&
-        command_n_count == command_logical_n_count &&
         command_group0_m_count >= 1 && command_group0_m_count <= 8 &&
         command_result_enable == command_accum_final &&
         command_accum_first == !accum_open_q && continuation_ok;
     if (command_mode_split_n64)
-      command_descriptor_ok &= command_group1_m_count <= 8 &&
-                               command_bank_enable == 8'hff;
+      command_descriptor_base_ok &= command_group1_m_count <= 8 &&
+                                    command_bank_enable == 8'hff;
     else
-      command_descriptor_ok &= command_group1_m_count == 0;
+      command_descriptor_base_ok &= command_group1_m_count == 0;
+  end
+
+  always_comb begin
+    // The 128-bit lane-mask popcount is intentionally split across the
+    // command-accept and validate cycles.  Eight local popcounts are captured
+    // first, then this balanced tree performs only three short add stages.
+    for (int pair = 0; pair < 4; pair++)
+      registered_count_pair[pair] =
+          command_bank_lane_count_q[2*pair] +
+          command_bank_lane_count_q[2*pair+1];
+    registered_count_quad[0] =
+        registered_count_pair[0] + registered_count_pair[1];
+    registered_count_quad[1] =
+        registered_count_pair[2] + registered_count_pair[3];
+    registered_logical_n_count = command_mode_split_n64_q ?
+        {1'b0, registered_count_quad[0]} :
+        registered_count_quad[0] + registered_count_quad[1];
+    registered_descriptor_ok = command_descriptor_base_ok_q &&
+        n_count_q == registered_logical_n_count;
   end
 
   always_comb begin
@@ -334,9 +388,7 @@ module alexnet_m8n128_tile_payload #(
         next_physical_slice = slice;
         next_physical_found = 1'b1;
       end
-      if (slice > result_slice_q && bank_enable_q[slice >> 1] &&
-          (slice[0] ? |n_lane_mask_q[slice >> 1][15:8] :
-                      |n_lane_mask_q[slice >> 1][7:0]))
+      if (slice > result_slice_q && slice_has_lanes_q[slice])
         output_last_slice = 1'b0;
     end
     physical_last_slice = !next_physical_found;
@@ -344,12 +396,7 @@ module alexnet_m8n128_tile_payload #(
 
   always_comb begin
     for (int group = 0; group < 2; group++) begin
-      group_ce[group] = state_q == ST_CLEAR || state_q == ST_ISSUE ||
-                        state_q == ST_FLUSH || state_q == ST_WAIT_SLICE ||
-                        state_q == ST_PARAM_REQ || state_q == ST_PARAM_WAIT ||
-                        state_q == ST_CFG || state_q == ST_CAPTURE ||
-                        state_q == ST_REQUANT || state_q == ST_RESULT ||
-                        state_q == ST_DISCARD;
+      group_ce[group] = sa_ce_q[group];
       group_issue_valid[group] = issue_fire && issue_metadata_ok &&
                                  (group == 0 || mode_split_q);
       group_tile_clear[group] = state_q == ST_CLEAR && accum_first_q &&
@@ -406,6 +453,9 @@ module alexnet_m8n128_tile_payload #(
       layer_id_q <= '0;
       mode_split_q <= 1'b0;
       bank_enable_q <= '0;
+      slice_has_lanes_q <= '0;
+      command_mode_split_n64_q <= 1'b0;
+      command_descriptor_base_ok_q <= 1'b0;
       n_base_q <= '0;
       n_count_q <= '0;
       m_base_q <= '0;
@@ -439,8 +489,10 @@ module alexnet_m8n128_tile_payload #(
       result_stall_cycles <= '0;
       useful_mac_count <= '0;
       physical_mac_slot_count <= '0;
-      for (int bank = 0; bank < 8; bank++)
+      for (int bank = 0; bank < 8; bank++) begin
         n_lane_mask_q[bank] <= '0;
+        command_bank_lane_count_q[bank] <= '0;
+      end
       for (int lane = 0; lane < 8; lane++) begin
         requant_cfg_bias_q[lane] <= '0;
         requant_cfg_multiplier_q[lane] <= '0;
@@ -463,6 +515,8 @@ module alexnet_m8n128_tile_payload #(
       end
 
       if (command_fire) begin
+        command_mode_split_n64_q <= command_mode_split_n64;
+        command_descriptor_base_ok_q <= command_descriptor_base_ok;
         layer_id_q <= command_layer_id;
         mode_split_q <= command_effective_split;
         bank_enable_q <= command_effective_bank_enable;
@@ -480,34 +534,46 @@ module alexnet_m8n128_tile_payload #(
         expected_k_q <= '0;
         result_slice_q <= '0;
         for (int bank = 0; bank < 8; bank++) begin
+          command_bank_lane_count_q[bank] <=
+              command_bank_lane_count[bank];
           if (command_mode_split_n64 && command_group1_m_count == 0 &&
-              bank >= 4)
+              bank >= 4) begin
             n_lane_mask_q[bank] <= '0;
-          else
+            slice_has_lanes_q[2*bank] <= 1'b0;
+            slice_has_lanes_q[2*bank+1] <= 1'b0;
+          end else begin
             n_lane_mask_q[bank] <= command_n_lane_mask[bank];
+            slice_has_lanes_q[2*bank] <=
+                command_effective_bank_enable[bank] &&
+                |command_n_lane_mask[bank][7:0];
+            slice_has_lanes_q[2*bank+1] <=
+                command_effective_bank_enable[bank] &&
+                |command_n_lane_mask[bank][15:8];
+          end
         end
+        state_q <= ST_VALIDATE;
+      end
 
-        if (!command_descriptor_ok) begin
+      case (state_q)
+        ST_VALIDATE: if (!registered_descriptor_ok) begin
           fault <= 1'b1;
           state_q <= ST_ERROR;
         end else begin
-          if (command_accum_first) begin
+          if (accum_first_q) begin
             accum_open_q <= 1'b1;
-            accum_mode_split_q <= command_effective_split;
-            accum_bank_enable_q <= command_effective_bank_enable;
-            accum_n_base_q <= command_n_base;
-            accum_m_base_q <= command_m_base;
-            accum_group_m_count_q[0] <= command_group0_m_count;
-            accum_group_m_count_q[1] <= command_group1_m_count;
-            accum_tile_tag_q <= command_tile_tag;
+            accum_mode_split_q <= mode_split_q;
+            accum_bank_enable_q <= bank_enable_q;
+            accum_n_base_q <= n_base_q;
+            accum_m_base_q <= m_base_q;
+            accum_group_m_count_q[0] <= group_m_count_q[0];
+            accum_group_m_count_q[1] <= group_m_count_q[1];
+            accum_tile_tag_q <= tile_tag_q;
             state_q <= ST_CLEAR;
           end else begin
             state_q <= ST_ISSUE;
           end
         end
-      end
 
-      case (state_q)
         ST_CLEAR: state_q <= ST_ISSUE;
 
         ST_ISSUE: if (issue_fire) begin
@@ -539,7 +605,7 @@ module alexnet_m8n128_tile_payload #(
         end
 
         ST_WAIT_SLICE: if (selected_slice_valid) begin
-          if (selected_n_lane_mask == 0)
+          if (!slice_has_lanes_q[result_slice_q[3:0]])
             state_q <= ST_DISCARD;
           else
             state_q <= ST_PARAM_REQ;
@@ -620,7 +686,8 @@ module alexnet_m8n128_tile_payload #(
   end
 
   alexnet_sa_m8n128_dynamic #(
-      .TILE_TAG_W(TILE_TAG_W)
+      .TILE_TAG_W(TILE_TAG_W),
+      .ACC_CLEAR_INDEPENDENT(1'b1)
   ) u_dynamic_sa (
       .clk,
       .rst,

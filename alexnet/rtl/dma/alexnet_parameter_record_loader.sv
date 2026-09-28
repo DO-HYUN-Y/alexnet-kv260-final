@@ -151,6 +151,10 @@ module alexnet_parameter_record_loader (
     if (!rst) begin
       if (s_axis_tvalid && !loading_q)
         $warning("parameter loader received data without an active tile");
+      if (axis_fire && !beat_fields_valid)
+        $error("parameter loader malformed beat layer=%0d n=%0d lane=%0d data=%h keep=%h last=%0b expected_relu=%0b",
+               layer_id_q, n_base_q, lane_q, s_axis_tdata, s_axis_tkeep,
+               s_axis_tlast, expected_relu);
       if (response_valid_q && loading_q)
         $fatal(1, "parameter loader exposed a response while still loading");
     end

@@ -1,6 +1,6 @@
 # AlexNet accelerator AXI-Lite register map
 
-`alexnet_m4n8_accelerator_top` exposes one 32-bit AXI4-Lite slave at
+The AlexNet accelerator tops expose one 32-bit AXI4-Lite slave at
 `S_AXI_CTRL`. All offsets are byte offsets from the accelerator control base.
 The interface and accelerator run in the same 200 MHz clock domain.
 
@@ -21,7 +21,7 @@ frame. Each eight-byte DDR word contains signed INT8 model channels in bytes
 
 | Offset | Name | Access | Description |
 | ---: | --- | --- | --- |
-| `0x00` | `ID` | RO | `0x414C0100`: AlexNet module `AL`, RTL ABI version 1 |
+| `0x00` | `ID` | RO | implementation ID; native-batch-8 M8xN126 build is `0x4D388500` |
 | `0x04` | `CONTROL` | WO/W1P | bit 0 submit, bit 1 clear all sticky status, bit 2 cancel pending job |
 | `0x08` | `STATUS` | RO | live and sticky state described below |
 | `0x0C` | `JOB_TAG` | RW | next-job tag in bits 15:0 |
@@ -46,10 +46,41 @@ frame. Each eight-byte DDR word contains signed INT8 model channels in bytes
 | `0x70` | `REJECTED_SUBMITS` | RO | rejected submit count since reset |
 | `0x74` | `FAILED_JOBS` | RO | failed inference count since reset |
 | `0x78` | `CONFIG_STATUS` | RO | bit 0 valid, bit 1 aligned, bit 2 within 32-bit DMA range, bit 8 pending |
-| `0x7C` | `BUILD_CONFIG` | RO | logical M=8, N=8, clock target=200 MHz |
+| `0x7C` | `BUILD_CONFIG` | RO | logical M, N, and clock target; M8xN126/200 is `0x087E00C8` |
+| `0x80` | `PERF_ACTIVE` | RO | engine active cycles for the current/last job |
+| `0x84` | `PERF_ISSUE` | RO | physical MAC issue cycles for the current/last job |
+| `0x88` | `PERF_WEIGHT_STALL` | RO | weight-stall cycles |
+| `0x8C` | `PERF_ACT_STALL` | RO | activation-stall cycles |
+| `0x90` | `PERF_RESULT_STALL` | RO | result-stall cycles |
+| `0x94`/`0x98` | `PERF_USEFUL_MAC_LO/HI` | RO | useful MAC operations for the current/last job |
+| `0x9C`/`0xA0` | `PERF_PEAK_MAC_LO/HI` | RO | occupied physical MAC slots for the current/last job |
+| `0xA4` | `PERF_SIGNATURE` | RO | folded result signature |
+| `0xA8` | `PERF_TILES` | RO | completed engine commands |
+| `0xAC`/`0xB0` | `DDR_READ_BYTES_LO/HI` | RO | cumulative accepted DDR-read payload bytes |
+| `0xB4`/`0xB8` | `DDR_WRITE_BYTES_LO/HI` | RO | cumulative accepted DDR-write payload bytes |
+| `0xBC`/`0xC0` | `MAIN_READ_BYTES_LO/HI` | RO | cumulative HP0/main-MM2S bytes |
+| `0xC4`/`0xC8` | `WEIGHT_READ_BYTES_LO/HI` | RO | cumulative HP3 weight/parameter bytes |
+| `0xCC`/`0xD0` | `CAMERA_READ_BYTES_LO/HI` | RO | cumulative camera-MM2S bytes received by PL |
+| `0xD4` | `PIPELINE_TOTAL` | RO | cumulative cycles inside accepted inference jobs |
+| `0xD8` | `PIPELINE_ENGINE` | RO | cycles with the graph engine busy |
+| `0xDC` | `PIPELINE_WEIGHT` | RO | weight or parameter fill-service cycles |
+| `0xE0` | `PIPELINE_PATCH` | RO | activation/raster patch-service cycles |
+| `0xE4` | `PIPELINE_POOL` | RO | pooling-service cycles |
+| `0xE8` | `PIPELINE_RESULT` | RO | result-coalescer fill/drain cycles |
+| `0xEC` | `PIPELINE_RASTER` | RO | Conv1 raster setup/load cycles |
+| `0xF0` | `PIPELINE_DMA` | RO | cycles with either DMA engine busy |
+| `0xF4` | `PIPELINE_OVERLAP` | RO | engine-busy cycles overlapped by weight/patch service |
+| `0xF8` | `PIPELINE_IDLE` | RO | in-job cycles with no engine or data service active |
 
 Unmapped reads and writes return AXI `SLVERR`. Byte writes are honored through
 `WSTRB`.
+
+The five byte counters increment on AXI-Stream `TVALID && TREADY` and add the
+number of asserted `TKEEP` bits. They measure payload delivered across the PL
+DMA boundary, including partial final beats and excluding backpressured cycles.
+They reset only with the accelerator and wrap modulo 2^64. Software must take
+idle before/after snapshots and subtract modulo 2^64. To avoid a torn 32-bit
+rollover, read high, low, then high again and retry if the high halves differ.
 
 ## Status fields
 

@@ -15,7 +15,10 @@
 // latency from an input issue edge to the matching aligned-control edge is
 // four enabled cycles.
 module alexnet_packed_pe #(
-    parameter int ACC_W = 27
+    parameter int ACC_W = 27,
+    // The graph engine may clear an idle accumulator independently of CE.
+    // This removes the fabric-wide CE from the accumulator reset path.
+    parameter bit ACC_CLEAR_INDEPENDENT = 1'b0
 ) (
     input  logic clk,
     input  logic rst,
@@ -119,24 +122,23 @@ module alexnet_packed_pe #(
       if (result_valid && result_ready)
         result_valid <= 1'b0;
 
-      if (ce) begin
-        // acc_clear is a standalone aligned control cycle. Keeping it out of
-        // the MAC cycle removes two 27-bit clear muxes from every physical PE.
-        if (acc_clear) begin
-          acc_lo_q <= '0;
-          acc_hi_q <= '0;
-        end else if (mac_valid) begin
-          if (reduce_last) begin
-            hold_lo_q        <= acc_lo_sum;
-            hold_hi_q        <= acc_hi_sum;
-            result_lane_mask <= lane_mask;
-            result_valid     <= 1'b1;
-            acc_lo_q         <= '0;
-            acc_hi_q         <= '0;
-          end else begin
-            acc_lo_q <= acc_lo_sum;
-            acc_hi_q <= acc_hi_sum;
-          end
+      // acc_clear is a standalone aligned control cycle. In graph mode the
+      // clear may repeat while CE is low, but no MAC is accepted then and
+      // the accumulator is already required to be zero before the next tile.
+      if (acc_clear && (ACC_CLEAR_INDEPENDENT || ce)) begin
+        acc_lo_q <= '0;
+        acc_hi_q <= '0;
+      end else if (ce && mac_valid) begin
+        if (reduce_last) begin
+          hold_lo_q        <= acc_lo_sum;
+          hold_hi_q        <= acc_hi_sum;
+          result_lane_mask <= lane_mask;
+          result_valid     <= 1'b1;
+          acc_lo_q         <= '0;
+          acc_hi_q         <= '0;
+        end else begin
+          acc_lo_q <= acc_lo_sum;
+          acc_hi_q <= acc_hi_sum;
         end
       end
     end

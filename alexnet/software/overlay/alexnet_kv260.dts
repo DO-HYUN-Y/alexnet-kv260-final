@@ -5,7 +5,7 @@
     fragment@0 {
         target = <&fpga_full>;
         __overlay__ {
-            firmware-name = "alexnet_m4n8_kv260.bit.bin";
+            firmware-name = "alexnet_m8n126_graph_kv260.bit.bin";
         };
     };
 
@@ -26,7 +26,7 @@
 
                 clocks = <&zynqmp_clk 71>;
                 clock-names = "pl_clk0";
-                yun,fabric-clock-hz = <199998002>;
+                yun,fabric-clock-hz = <184998151>;
             };
         };
     };

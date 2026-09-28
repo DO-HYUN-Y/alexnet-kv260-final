@@ -14,7 +14,8 @@
 // storage and gives every four-bank cluster an independent CE.  The caller
 // owns tile scheduling, weight-bank addressing and ordered result retirement.
 module alexnet_sa_m8n128_dynamic #(
-    parameter int TILE_TAG_W = 16
+    parameter int TILE_TAG_W = 16,
+    parameter bit ACC_CLEAR_INDEPENDENT = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -117,7 +118,8 @@ module alexnet_sa_m8n128_dynamic #(
       alexnet_sa_m4n8 #(
           .PHYS_ROWS(4),
           .COLS(16),
-          .DSP_LATENCY(4)
+          .DSP_LATENCY(4),
+          .ACC_CLEAR_INDEPENDENT(ACC_CLEAR_INDEPENDENT)
       ) u_sa (
           .clk,
           .rst,

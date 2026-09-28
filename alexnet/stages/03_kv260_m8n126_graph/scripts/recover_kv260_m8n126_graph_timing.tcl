@@ -10,7 +10,11 @@ set routed_checkpoint [file join $project_dir alexnet_m4n8_kv260.runs \
     impl_1 system_wrapper_postroute_physopt.dcp]
 
 if {![file exists $routed_checkpoint]} {
-    error "No post-route checkpoint to recover: $routed_checkpoint"
+    set routed_checkpoint [file join $project_dir alexnet_m4n8_kv260.runs \
+        impl_1 system_wrapper_routed.dcp]
+}
+if {![file exists $routed_checkpoint]} {
+    error "No routed checkpoint to recover: $routed_checkpoint"
 }
 
 file mkdir $report_dir
@@ -91,8 +95,34 @@ puts $summary_file "URAM288=[llength $uram_cells]"
 puts $summary_file "HP_PORTS_ENABLED=4"
 puts $summary_file "HP_PORTS_ACTIVE=4"
 puts $summary_file "HP3_WEIGHT_MM2S=1"
-puts $summary_file "GRAPH_SCHEDULER_COMMANDS=1635"
-puts $summary_file "GRAPH_USEFUL_MACS=714188480"
+puts $summary_file "CONV1_INPUT_LAYOUT=N8_RASTER"
+puts $summary_file "CONV1_INPUT_BYTES=401408"
+puts $summary_file "CONV1_LEGACY_PATCH_TAPE_BYTES=1103520"
+puts $summary_file "CONV1_DDR_READ_REDUCTION_BYTES=702112"
+puts $summary_file \
+    "LATER_ACTIVATION_LAYOUT=N8_TILE_SPATIAL_N8_LANE"
+puts $summary_file "LATER_ACTIVATION_CACHE_MAX_BYTES=64896"
+puts $summary_file "CONV_ACTIVATION_CACHE_LOADS_PER_IMAGE=13"
+puts $summary_file "FC_BATCH_ACTIVATION_CACHE_LOADS_PER_BATCH=3"
+puts $summary_file "LATER_LEGACY_PATCH_TAPE_BYTES=0"
+puts $summary_file "ACTIVATION_PATCH_SERVICE_OOC_DSP48E2=0"
+puts $summary_file "ACTIVATION_PATCH_SERVICE_OOC_RAMB36E2=16"
+puts $summary_file "ACTIVATION_PATCH_SERVICE_OOC_RAMB18E2=0"
+puts $summary_file "NATIVE_BATCH_SIZE=8"
+puts $summary_file "GRAPH_SCHEDULER_COMMANDS_PER_BATCH=5471"
+puts $summary_file "GRAPH_USEFUL_MACS_PER_BATCH=5713507840"
+puts $summary_file "GRAPH_PHYSICAL_MAC_SLOTS_PER_BATCH=10487676928"
+puts $summary_file "GRAPH_SLOT_UTILIZATION_PERCENT=54.478"
+puts $summary_file "GRAPH_LOGICAL_WEIGHT_BYTES=61090496"
+puts $summary_file "GRAPH_WEIGHT_TRANSFER_BYTES_PER_BATCH=61123264"
+puts $summary_file "PARAMETER_TRANSFER_BYTES_PER_BATCH=165504"
+puts $summary_file "EXPECTED_DDR_READ_BYTES_PER_BATCH=72407872"
+puts $summary_file "EXPECTED_DDR_WRITE_BYTES_PER_BATCH=4660032"
+puts $summary_file "EXPECTED_DDR_TOTAL_BYTES_PER_IMAGE=9633488"
+puts $summary_file "RESULT_LAYOUT=N8_TILE_BATCH8_N8_LANE"
+puts $summary_file "INPLACE_POOL_LAYERS=1,2,5"
+puts $summary_file "POOL_MAX_RAW_TILE_BYTES=24200"
+puts $summary_file "POOL_DMA_POLICY=SEQUENTIAL_MM2S_S2MM"
 puts $summary_file \
     "BITSTREAM=[file join $output_dir alexnet_m8n126_graph_kv260.bit]"
 puts $summary_file \
@@ -109,7 +139,7 @@ if {[llength $drc_errors] != 0 || [llength $drc_critical] != 0} {
     error "Recovered DRC failed: [llength $drc_errors] errors, [llength $drc_critical] critical warnings"
 }
 if {[llength $sa_dsp_cells] != 512 || [llength $dsp_cells] != 576 ||
-    [llength $uram_cells] != 40} {
+    [llength $uram_cells] != 54} {
     error "Recovered resource contract failed"
 }
 

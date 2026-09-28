@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "measurement_id": null,
+  "date": null,
+  "status": "pending",
+  "platform": "Kria KV260",
+  "source_revision": {
+    "commit": null,
+    "dirty": null
+  },
+  "artifacts": {
+    "bitstream_sha256": null,
+    "dtbo_sha256": null,
+    "model_manifest_sha256": null
+  },
+  "board_identity": {
+    "accelerator_id": null,
+    "abi": null,
+    "pl_input_clock_hz": null,
+    "fabric_clock_hz": null,
+    "kernel": null,
+    "driver_version": null
+  },
+  "workload": {
+    "model": "AlexNet INT8 full graph",
+    "macs_per_image": 714188480,
+    "ops_per_mac": 2,
+    "execution_mode": null,
+    "batch_size": null,
+    "measurement_scope": "preprocessed_infer_only",
+    "input_source": null,
+    "warmup_batches": null
+  },
+  "correctness": {
+    "golden_match": null,
+    "output_hashes": [],
+    "top1_accuracy_percent": null,
+    "top5_accuracy_percent": null,
+    "fault_registers": null
+  },
+  "throughput": {
+    "active_seconds": null,
+    "completed_batches": null,
+    "completed_images": null,
+    "images_per_second": null,
+    "batch_latency_ms": {"mean": null, "median": null, "p95": null, "p99": null},
+    "image_latency_ms": {"mean": null, "median": null, "p95": null, "p99": null},
+    "effective_tops": null,
+    "theoretical_peak_tops": null,
+    "end_to_end_pe_utilization_percent": null
+  },
+  "hardware_counters": {
+    "active_cycles": null,
+    "issue_cycles": null,
+    "weight_stall_cycles": null,
+    "activation_stall_cycles": null,
+    "result_stall_cycles": null,
+    "useful_mac_count": null,
+    "physical_mac_slot_count": null,
+    "pipeline_total_cycles": null,
+    "pipeline_stage_cycles": {},
+    "pipeline_overlap_cycles": null,
+    "pipeline_idle_cycles": null
+  },
+  "ddr": {
+    "payload_counter_scope": "accepted_axi_stream_dma_payload_bytes",
+    "read_bytes_per_image": null,
+    "write_bytes_per_image": null,
+    "main_read_bytes_per_image": null,
+    "weight_read_bytes_per_image": null,
+    "camera_read_bytes_per_image": null,
+    "total_bytes_per_image": null,
+    "payload_bandwidth_MBps": null,
+    "ps_apm_raw_ports": {},
+    "ps_apm_background_subtracted_bytes_per_image": null
+  },
+  "power": {
+    "sensor": null,
+    "rail_scope": null,
+    "sample_interval_seconds": null,
+    "samples": null,
+    "idle_mean_w": null,
+    "active_mean_w": null,
+    "active_p95_w": null,
+    "dynamic_mean_w": null,
+    "effective_tops_per_w": null,
+    "energy_j_per_image": null
+  },
+  "layer_profile": [],
+  "temperature": {
+    "start_c": null,
+    "end_c": null,
+    "maximum_c": null
+  },
+  "robustness": {
+    "duration_seconds": null,
+    "completed_jobs": null,
+    "failed_jobs": null,
+    "rejected_jobs": null
+  },
+  "notes": []
+}

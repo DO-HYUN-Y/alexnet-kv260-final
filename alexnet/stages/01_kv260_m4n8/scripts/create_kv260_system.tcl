@@ -11,11 +11,27 @@ set report_dir [file join $build_dir reports]
 set ip_repo_dir [file join $build_dir ip_repo]
 set use_four_hp 0
 set add_weight_dma 0
+set fabric_clock_mhz 200
 if {[info exists ::alexnet_use_four_hp]} {
     set use_four_hp $::alexnet_use_four_hp
 }
 if {[info exists ::alexnet_add_weight_dma]} {
     set add_weight_dma $::alexnet_add_weight_dma
+}
+if {[info exists ::alexnet_fabric_clock_mhz]} {
+    set fabric_clock_mhz $::alexnet_fabric_clock_mhz
+}
+if {$fabric_clock_mhz == 200} {
+    set mmcm_divclk_divide 1
+    set mmcm_clkfbout_mult_f 10.000
+    set mmcm_clkout0_divide_f 5.000
+} elseif {$fabric_clock_mhz == 185} {
+    # 100 MHz * 37 / 4 / 5 = 185 MHz, with a legal 925 MHz VCO.
+    set mmcm_divclk_divide 4
+    set mmcm_clkfbout_mult_f 37.000
+    set mmcm_clkout0_divide_f 5.000
+} else {
+    error "Unsupported fabric clock: $fabric_clock_mhz MHz (use 200 or 185)"
 }
 if {$add_weight_dma && !$use_four_hp} {
     error "The independent weight DMA requires the four-HP topology"
@@ -122,6 +138,13 @@ if {$add_weight_dma} {
 set accelerator [create_bd_cell -type ip \
     -vlnv user.org:user:alexnet_m4n8_accelerator:1.0 \
     alexnet_m4n8_0]
+if {[info exists ::alexnet_native_batch8] && $::alexnet_native_batch8} {
+    set_property -dict [list CONFIG.NATIVE_BATCH8 {1}] $accelerator
+}
+if {[info exists ::alexnet_fabric_clock_mhz]} {
+    set_property -dict [list \
+        CONFIG.BUILD_CLOCK_MHZ $fabric_clock_mhz] $accelerator
+}
 set camera_adapter [create_bd_cell -type ip \
     -vlnv user.org:user:alexnet_camera_rgbx_adapter:1.0 \
     camera_rgbx_0]
@@ -148,11 +171,12 @@ set_property -dict [list \
     CONFIG.PRIMITIVE {MMCM} \
     CONFIG.PRIM_SOURCE {No_buffer} \
     CONFIG.PRIM_IN_FREQ {99.999001} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {200.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ \
+        [format "%.3f" $fabric_clock_mhz] \
     CONFIG.OVERRIDE_MMCM {true} \
-    CONFIG.MMCM_DIVCLK_DIVIDE {1} \
-    CONFIG.MMCM_CLKFBOUT_MULT_F {10.000} \
-    CONFIG.MMCM_CLKOUT0_DIVIDE_F {5.000} \
+    CONFIG.MMCM_DIVCLK_DIVIDE $mmcm_divclk_divide \
+    CONFIG.MMCM_CLKFBOUT_MULT_F $mmcm_clkfbout_mult_f \
+    CONFIG.MMCM_CLKOUT0_DIVIDE_F $mmcm_clkout0_divide_f \
     CONFIG.USE_LOCKED {true} \
     CONFIG.USE_RESET {false} \
 ] $fabric_clk

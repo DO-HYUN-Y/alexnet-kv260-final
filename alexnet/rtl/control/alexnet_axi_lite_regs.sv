@@ -77,6 +77,23 @@ module alexnet_axi_lite_regs #(
     input logic [63:0] perf_peak_mac_slot_count,
     input logic [31:0] perf_result_signature,
     input logic [15:0] perf_completed_tiles,
+    // Cumulative payload bytes accepted on the DDR-facing AXI-Stream
+    // interfaces.  Software takes before/after snapshots for each job.
+    input logic [63:0] perf_ddr_read_bytes,
+    input logic [63:0] perf_ddr_write_bytes,
+    input logic [63:0] perf_main_read_bytes,
+    input logic [63:0] perf_weight_read_bytes,
+    input logic [63:0] perf_camera_read_bytes,
+    input logic [31:0] perf_pipeline_total_cycles,
+    input logic [31:0] perf_engine_cycles,
+    input logic [31:0] perf_weight_service_cycles,
+    input logic [31:0] perf_patch_service_cycles,
+    input logic [31:0] perf_pool_cycles,
+    input logic [31:0] perf_result_service_cycles,
+    input logic [31:0] perf_raster_cycles,
+    input logic [31:0] perf_dma_cycles,
+    input logic [31:0] perf_overlap_cycles,
+    input logic [31:0] perf_pipeline_idle_cycles,
 
     output logic irq,
     output logic start_pending,
@@ -128,6 +145,26 @@ module alexnet_axi_lite_regs #(
   localparam logic [ADDR_W-1:0] REG_PERF_PEAK_MAC_HI = ADDR_W'(8'ha0);
   localparam logic [ADDR_W-1:0] REG_PERF_SIGNATURE = ADDR_W'(8'ha4);
   localparam logic [ADDR_W-1:0] REG_PERF_TILES = ADDR_W'(8'ha8);
+  localparam logic [ADDR_W-1:0] REG_PERF_DDR_READ_LO = ADDR_W'(8'hac);
+  localparam logic [ADDR_W-1:0] REG_PERF_DDR_READ_HI = ADDR_W'(8'hb0);
+  localparam logic [ADDR_W-1:0] REG_PERF_DDR_WRITE_LO = ADDR_W'(8'hb4);
+  localparam logic [ADDR_W-1:0] REG_PERF_DDR_WRITE_HI = ADDR_W'(8'hb8);
+  localparam logic [ADDR_W-1:0] REG_PERF_MAIN_READ_LO = ADDR_W'(8'hbc);
+  localparam logic [ADDR_W-1:0] REG_PERF_MAIN_READ_HI = ADDR_W'(8'hc0);
+  localparam logic [ADDR_W-1:0] REG_PERF_WEIGHT_READ_LO = ADDR_W'(8'hc4);
+  localparam logic [ADDR_W-1:0] REG_PERF_WEIGHT_READ_HI = ADDR_W'(8'hc8);
+  localparam logic [ADDR_W-1:0] REG_PERF_CAMERA_READ_LO = ADDR_W'(8'hcc);
+  localparam logic [ADDR_W-1:0] REG_PERF_CAMERA_READ_HI = ADDR_W'(8'hd0);
+  localparam logic [ADDR_W-1:0] REG_PIPE_TOTAL = ADDR_W'(8'hd4);
+  localparam logic [ADDR_W-1:0] REG_PIPE_ENGINE = ADDR_W'(8'hd8);
+  localparam logic [ADDR_W-1:0] REG_PIPE_WEIGHT = ADDR_W'(8'hdc);
+  localparam logic [ADDR_W-1:0] REG_PIPE_PATCH = ADDR_W'(8'he0);
+  localparam logic [ADDR_W-1:0] REG_PIPE_POOL = ADDR_W'(8'he4);
+  localparam logic [ADDR_W-1:0] REG_PIPE_RESULT = ADDR_W'(8'he8);
+  localparam logic [ADDR_W-1:0] REG_PIPE_RASTER = ADDR_W'(8'hec);
+  localparam logic [ADDR_W-1:0] REG_PIPE_DMA = ADDR_W'(8'hf0);
+  localparam logic [ADDR_W-1:0] REG_PIPE_OVERLAP = ADDR_W'(8'hf4);
+  localparam logic [ADDR_W-1:0] REG_PIPE_IDLE = ADDR_W'(8'hf8);
 
   logic aw_pending_q;
   logic [ADDR_W-1:0] awaddr_q;
@@ -300,6 +337,26 @@ module alexnet_axi_lite_regs #(
       REG_PERF_PEAK_MAC_HI: read_data_c = perf_peak_mac_slot_count[63:32];
       REG_PERF_SIGNATURE: read_data_c = perf_result_signature;
       REG_PERF_TILES: read_data_c = {16'd0, perf_completed_tiles};
+      REG_PERF_DDR_READ_LO: read_data_c = perf_ddr_read_bytes[31:0];
+      REG_PERF_DDR_READ_HI: read_data_c = perf_ddr_read_bytes[63:32];
+      REG_PERF_DDR_WRITE_LO: read_data_c = perf_ddr_write_bytes[31:0];
+      REG_PERF_DDR_WRITE_HI: read_data_c = perf_ddr_write_bytes[63:32];
+      REG_PERF_MAIN_READ_LO: read_data_c = perf_main_read_bytes[31:0];
+      REG_PERF_MAIN_READ_HI: read_data_c = perf_main_read_bytes[63:32];
+      REG_PERF_WEIGHT_READ_LO: read_data_c = perf_weight_read_bytes[31:0];
+      REG_PERF_WEIGHT_READ_HI: read_data_c = perf_weight_read_bytes[63:32];
+      REG_PERF_CAMERA_READ_LO: read_data_c = perf_camera_read_bytes[31:0];
+      REG_PERF_CAMERA_READ_HI: read_data_c = perf_camera_read_bytes[63:32];
+      REG_PIPE_TOTAL: read_data_c = perf_pipeline_total_cycles;
+      REG_PIPE_ENGINE: read_data_c = perf_engine_cycles;
+      REG_PIPE_WEIGHT: read_data_c = perf_weight_service_cycles;
+      REG_PIPE_PATCH: read_data_c = perf_patch_service_cycles;
+      REG_PIPE_POOL: read_data_c = perf_pool_cycles;
+      REG_PIPE_RESULT: read_data_c = perf_result_service_cycles;
+      REG_PIPE_RASTER: read_data_c = perf_raster_cycles;
+      REG_PIPE_DMA: read_data_c = perf_dma_cycles;
+      REG_PIPE_OVERLAP: read_data_c = perf_overlap_cycles;
+      REG_PIPE_IDLE: read_data_c = perf_pipeline_idle_cycles;
       default: read_resp_c = 2'b10;
     endcase
   end

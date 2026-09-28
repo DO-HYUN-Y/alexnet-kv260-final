@@ -19,10 +19,11 @@ accelerator. The main DMA's MM2S and S2MM channels also have independent
 controllers that arbitrate their shared AXI-Lite register port, so the long
 Conv1 raster read can overlap result writes. Parameter records use the idle
 HP3 weight MM2S rather than waiting behind that raster. Weight traffic
-therefore no longer shares the main MM2S memory port. The current graph engine
-requests a weight tile and then computes it; overlapping the inactive weight
-ping-pong fill with the active tile is a later scheduling optimization and is
-not claimed by this checkpoint.
+therefore no longer shares the main MM2S memory port. The graph engine
+prefetches the next descriptor's weight and patch data into the inactive
+ping-pong set while the current descriptor computes. Layer-final descriptors
+remain hard completion fences so pooling and layer transitions cannot observe
+unfinished output.
 
 ## Storage contract
 
@@ -42,13 +43,14 @@ advances to the next layer. This correctness-first serialized path adds
 465,152 bytes of DDR traffic per image (raw reads plus pooled writes).
 
 Conv2 through FC8 no longer use the legacy K-major patch tape. The activation
-service loads each N8-tile-major A/B tensor once per layer, then assembles the
-exact K-major M16 windows requested by Conv2-5. FC6 reads Pool5 in PyTorch
-channel-major flatten order, and FC7/8 use linear activation order. The seven
-later-layer cache loads total 204,672 bytes per image; the largest resident
-tensor is Conv3 output at 64,896 bytes. The correctness-first service currently
-returns one activation lane per cycle, so its issue-stall cost must be measured
-and optimized after the complete graph is numerically proven. The frozen
+service loads each N8-tile-major A/B tensor for the active N tile, then
+assembles the exact K-major M16 windows requested by Conv2-5. FC6 reads Pool5
+in PyTorch channel-major flatten order, and FC7/8 use linear activation order.
+The largest resident tensor is Conv3 output at 64,896 bytes. The activation
+services spread spatial data over independent 64-bit banks and gather all
+active M lanes in parallel. Their current request path takes three cycles per
+emitted K word (address, capture, output), so board counters must determine how
+much remains visible after descriptor prefetch overlap. The frozen
 format-v2 weight ABI remains aligned to the N128 service: Conv3-5 use N112
 scheduler tiles and FC8's final N8 tail is zero-padded to one N16 beat.
 

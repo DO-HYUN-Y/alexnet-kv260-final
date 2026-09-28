@@ -442,8 +442,31 @@ module tb_alexnet_n128_weight_pingpong;
     replay_transaction(0, 300, 9, 8'h55, 6, 16'h0fff, 1'b1);
     release_set(300);
 
-    if (!idle || completed_fills != 3 || completed_replays != 3 ||
-        replay_words != 51 || overlap_cycles == 0 || protocol_error)
+    // FC6 uses the same context tag for all three K chunks.  Exercise the
+    // alternating set sequence and make sure release removes the set that was
+    // just replayed, not the same-tag look-ahead set.
+    fill_transaction(0, 400, 7, 8'h01, 0, 16'hffff, 1'b0);
+    fork
+      replay_transaction(0, 400, 7, 8'h01, 0, 16'hffff, 1'b0);
+      fill_transaction(1, 400, 5, 8'h01, 0, 16'hffff, 1'b0);
+    join
+    release_set(400);
+    if (set_state[0] != 0 || set_state[1] != 2)
+      $fatal(1, "same-tag release discarded first look-ahead set");
+
+    fork
+      replay_transaction(1, 400, 5, 8'h01, 0, 16'hffff, 1'b0);
+      fill_transaction(0, 400, 3, 8'h01, 0, 16'hffff, 1'b0);
+    join
+    release_set(400);
+    if (set_state[0] != 2 || set_state[1] != 0)
+      $fatal(1, "same-tag release discarded second look-ahead set");
+
+    replay_transaction(0, 400, 3, 8'h01, 0, 16'hffff, 1'b0);
+    release_set(400);
+
+    if (!idle || completed_fills != 6 || completed_replays != 6 ||
+        replay_words != 66 || overlap_cycles == 0 || protocol_error)
       $fatal(1,
              "N128 final status mismatch fills=%0d replays=%0d words=%0d overlap=%0d idle=%0b",
              completed_fills, completed_replays, replay_words,

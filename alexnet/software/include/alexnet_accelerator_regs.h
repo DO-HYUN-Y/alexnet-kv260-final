@@ -47,6 +47,37 @@
 #define ALEXNET_REG_FAILED_JOBS        0x74u
 #define ALEXNET_REG_CONFIG_STATUS      0x78u
 #define ALEXNET_REG_BUILD_CONFIG       0x7cu
+#define ALEXNET_REG_PERF_ACTIVE        0x80u
+#define ALEXNET_REG_PERF_ISSUE         0x84u
+#define ALEXNET_REG_PERF_WEIGHT_STALL  0x88u
+#define ALEXNET_REG_PERF_ACT_STALL     0x8cu
+#define ALEXNET_REG_PERF_RESULT_STALL  0x90u
+#define ALEXNET_REG_PERF_USEFUL_MAC_LO 0x94u
+#define ALEXNET_REG_PERF_USEFUL_MAC_HI 0x98u
+#define ALEXNET_REG_PERF_PEAK_MAC_LO   0x9cu
+#define ALEXNET_REG_PERF_PEAK_MAC_HI   0xa0u
+#define ALEXNET_REG_PERF_SIGNATURE     0xa4u
+#define ALEXNET_REG_PERF_TILES         0xa8u
+#define ALEXNET_REG_DDR_READ_BYTES_LO  0xacu
+#define ALEXNET_REG_DDR_READ_BYTES_HI  0xb0u
+#define ALEXNET_REG_DDR_WRITE_BYTES_LO 0xb4u
+#define ALEXNET_REG_DDR_WRITE_BYTES_HI 0xb8u
+#define ALEXNET_REG_MAIN_READ_BYTES_LO 0xbcu
+#define ALEXNET_REG_MAIN_READ_BYTES_HI 0xc0u
+#define ALEXNET_REG_WEIGHT_READ_BYTES_LO 0xc4u
+#define ALEXNET_REG_WEIGHT_READ_BYTES_HI 0xc8u
+#define ALEXNET_REG_CAMERA_READ_BYTES_LO 0xccu
+#define ALEXNET_REG_CAMERA_READ_BYTES_HI 0xd0u
+#define ALEXNET_REG_PIPELINE_TOTAL      0xd4u
+#define ALEXNET_REG_PIPELINE_ENGINE     0xd8u
+#define ALEXNET_REG_PIPELINE_WEIGHT     0xdcu
+#define ALEXNET_REG_PIPELINE_PATCH      0xe0u
+#define ALEXNET_REG_PIPELINE_POOL       0xe4u
+#define ALEXNET_REG_PIPELINE_RESULT     0xe8u
+#define ALEXNET_REG_PIPELINE_RASTER     0xecu
+#define ALEXNET_REG_PIPELINE_DMA        0xf0u
+#define ALEXNET_REG_PIPELINE_OVERLAP    0xf4u
+#define ALEXNET_REG_PIPELINE_IDLE       0xf8u
 
 #define ALEXNET_CONTROL_SUBMIT         (1u << 0)
 #define ALEXNET_CONTROL_CLEAR_STATUS   (1u << 1)
@@ -73,8 +104,8 @@
 #define ALEXNET_IRQ_ENABLE_DONE        (1u << 0)
 #define ALEXNET_IRQ_ENABLE_ERROR       (1u << 1)
 
-#define ALEXNET_EXPECTED_ID            0x414c0100u
-#define ALEXNET_EXPECTED_BUILD_CONFIG  0x080800c8u
+#define ALEXNET_EXPECTED_ID            0x4d388500u
+#define ALEXNET_EXPECTED_BUILD_CONFIG  0x087e00b9u
 
 /* Xilinx AXI DMA simple-mode MM2S registers used for the camera stream. */
 #define ALEXNET_AXIDMA_MM2S_DMACR      0x00u
@@ -99,6 +130,22 @@ static inline void alexnet_write64(volatile uint32_t *regs,
 {
     regs[low_offset / 4u] = (uint32_t)value;
     regs[(low_offset + 4u) / 4u] = (uint32_t)(value >> 32);
+}
+
+/* Read a free-running 64-bit counter without accepting a torn rollover. */
+static inline uint64_t alexnet_read_counter64(volatile const uint32_t *regs,
+                                              uint32_t low_offset)
+{
+    uint32_t high_before;
+    uint32_t low;
+    uint32_t high_after;
+
+    do {
+        high_before = regs[(low_offset + 4u) / 4u];
+        low = regs[low_offset / 4u];
+        high_after = regs[(low_offset + 4u) / 4u];
+    } while (high_before != high_after);
+    return ((uint64_t)high_after << 32) | low;
 }
 
 #endif

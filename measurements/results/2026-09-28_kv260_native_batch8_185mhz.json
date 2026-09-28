@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "measurement_id": "kv260-native-b8-185-20260928",
+  "date": "2026-09-28",
+  "status": "measured",
+  "platform": "Kria KV260",
+  "source_revision": {
+    "base_commit_before_native_batch8_work": "2d2003eafda32856fbf9cc3dfbf9e7004c43414f",
+    "published_snapshot": "The commit containing this result file; resolve with git log -- <file>."
+  },
+  "artifacts": {
+    "bitstream_sha256": "344d5afa958cb8ae782e249b07e3dcb1258489398da7a8fe144f4b9801d82d0d",
+    "dtbo_sha256": "e53568a30b17818119ff441d4ce1c8cafebbf1b9458b1dfa2669bc66f4ef64d5",
+    "deployment_archive_sha256": "0c0874f503167b5a31271dab9a9353f3978f1a6e5c4c61ad71720d4cd7734a22"
+  },
+  "board_identity": {
+    "abi": 2,
+    "pl_input_clock_hz": 99999999,
+    "fabric_clock_hz": 184998151,
+    "dma_base": "0x39800000",
+    "dma_size_bytes": 68771840
+  },
+  "workload": {
+    "model": "AlexNet INT8 full graph",
+    "macs_per_image": 714188480,
+    "ops_per_mac": 2,
+    "execution_mode": "native_pl_batch8_conv_fc_weight_reuse",
+    "batch_size": 8,
+    "measurement_scope": "preprocessed_infer_only",
+    "source": "repeated_saved_image",
+    "functional_winner_index_by_slot": [104, 104, 104, 104, 104, 104, 104, 104],
+    "functional_winner_label": "wallaby"
+  },
+  "throughput": {
+    "active_seconds": 10.352423528000145,
+    "completed_batches": 29,
+    "completed_images": 232,
+    "images_per_second": 22.41021142271767,
+    "mean_batch_ms": 356.9731984827176,
+    "mean_image_ms": 44.6216498103397,
+    "effective_tops": 0.03201022966493874,
+    "theoretical_peak_tops": 0.378876213248,
+    "end_to_end_pe_utilization_percent": 8.448730362490686
+  },
+  "hardware_counters_one_steady_state_batch": {
+    "active_cycles": 12033449,
+    "issue_cycles": 10241872,
+    "weight_stall_cycles": 512,
+    "activation_stall_cycles": 0,
+    "result_stall_cycles": 0,
+    "useful_mac_count": 5713507840,
+    "physical_mac_slot_count": 10487676928,
+    "completed_tiles": 0,
+    "arithmetic_slot_utilization_percent": 54.47829752217173,
+    "issue_duty_within_payload_percent": 85.11169158567922,
+    "weight_stall_percent_of_active": 0.004254806747425447,
+    "activation_stall_percent_of_active": 0.0,
+    "result_stall_percent_of_active": 0.0,
+    "pipeline_total_cycles": 64848594,
+    "pipeline_engine_cycles": 64848351,
+    "pipeline_weight_cycles": 3967149,
+    "pipeline_patch_cycles": 57737825,
+    "pipeline_pool_cycles": 908113,
+    "pipeline_result_cycles": 43210746,
+    "pipeline_raster_cycles": 1214544,
+    "pipeline_dma_cycles": 7647142,
+    "pipeline_overlap_cycles": 61689178,
+    "pipeline_idle_cycles": 112,
+    "issue_duty_end_to_end_percent": 15.79351435129033,
+    "engine_share_percent": 99.99962528100455,
+    "overlap_share_percent": 95.12801156490764,
+    "completed_tiles_note": "Counter read returned zero; repeat before sign-off."
+  },
+  "accelerator_dma_payload": {
+    "scope": "accepted_axi_stream_dma_payload_bytes",
+    "timed_run": {
+      "ddr_read_bytes": 2095028672,
+      "ddr_write_bytes": 135140928,
+      "main_read_bytes": 322454016,
+      "weight_read_bytes": 1772574656,
+      "camera_read_bytes": 0,
+      "total_bytes": 2230169600,
+      "total_bytes_per_image": 9612800.0,
+      "weight_bytes_per_image": 7640408.0,
+      "payload_bandwidth_MBps": 215.4248803643004
+    },
+    "one_batch": {
+      "ddr_read_bytes": 72242368,
+      "ddr_write_bytes": 4660032,
+      "main_read_bytes": 11119104,
+      "weight_read_bytes": 61123264,
+      "camera_read_bytes": 0,
+      "total_bytes": 76902400,
+      "total_bytes_per_image": 9612800
+    }
+  },
+  "ps_ddr_apm_one_batch": {
+    "active_seconds": 0.3565042499994888,
+    "raw_ports": {
+      "0": {"read_bytes": 0, "write_bytes": 0},
+      "1": {"read_bytes": 775136, "write_bytes": 1755456},
+      "3": {"read_bytes": 99733376, "write_bytes": 0},
+      "4": {"read_bytes": 0, "write_bytes": 4660032},
+      "5": {"read_bytes": 61123264, "write_bytes": 0}
+    },
+    "raw_total": {"read_bytes": 161631776, "write_bytes": 6415488},
+    "background_subtracted_estimate": {
+      "read_bytes": 72302010.89851801,
+      "write_bytes": 6148993.512921525
+    }
+  },
+  "power": {
+    "sensor": "ina260_u14",
+    "rail_scope": "SOM_input",
+    "samples": 103,
+    "sample_interval_seconds": 0.1,
+    "mean_w": 4.048932038834951,
+    "effective_tops_per_w": 0.007905845135931063,
+    "energy_j_per_image_derived": 0.1806735314746058
+  },
+  "layer_profile_single_batch": [
+    {"layer": "conv1", "macs_per_image": 70276800, "batch_latency_ms": 11.636, "effective_pe_utilization_percent": 25.505},
+    {"layer": "conv2", "macs_per_image": 223948800, "batch_latency_ms": 71.374, "effective_pe_utilization_percent": 13.251},
+    {"layer": "conv3", "macs_per_image": 112140288, "batch_latency_ms": 48.061, "effective_pe_utilization_percent": 9.854},
+    {"layer": "conv4", "macs_per_image": 149520384, "batch_latency_ms": 70.934, "effective_pe_utilization_percent": 8.902},
+    {"layer": "conv5", "macs_per_image": 99680256, "batch_latency_ms": 48.443, "effective_pe_utilization_percent": 8.690},
+    {"layer": "fc6", "macs_per_image": 37748736, "batch_latency_ms": 64.451, "effective_pe_utilization_percent": 2.473},
+    {"layer": "fc7", "macs_per_image": 16777216, "batch_latency_ms": 28.635, "effective_pe_utilization_percent": 2.474},
+    {"layer": "fc8", "macs_per_image": 4096000, "batch_latency_ms": 10.728, "effective_pe_utilization_percent": 1.612}
+  ],
+  "comparison_to_2026_09_22_host_sequential_200mhz": {
+    "throughput_ratio": 5.9086088344007655,
+    "ddr_payload_reduction_percent": 84.93807702012589,
+    "weight_payload_reduction_percent": 87.72752342054592,
+    "tops_per_w_ratio": 6.312520759647135,
+    "energy_per_image_reduction_percent": 84.15846793894902
+  },
+  "known_limitations": [
+    "Input was one saved image repeated in all eight slots.",
+    "No ImageNet accuracy evaluation was performed.",
+    "Latency percentiles and controlled idle-power measurement were not captured.",
+    "The one-batch layer profile used software polling and must be repeated with hardware layer-cycle counters.",
+    "The completed_tiles counter unexpectedly read zero in the isolated diagnostic delta."
+  ]
+}

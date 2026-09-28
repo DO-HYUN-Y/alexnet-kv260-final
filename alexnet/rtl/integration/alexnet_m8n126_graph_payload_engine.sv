@@ -20,6 +20,14 @@ module alexnet_m8n126_graph_payload_engine #(
     input  logic start_valid,
     output logic start_ready,
     input  logic [15:0] start_tag,
+    input  logic [3:0] start_layer_id,
+    input  logic [3:0] stop_layer_id,
+    input  logic [3:0] fc_batch_size,
+    input  logic [15:0] start_n_base,
+    input  logic start_single_n_tile,
+    input  logic start_weight_fill_enable,
+    input  logic start_weight_release_enable,
+    input  logic start_pool_enable,
 
     output logic weight_request_valid,
     input  logic weight_request_ready,
@@ -104,10 +112,21 @@ module alexnet_m8n126_graph_payload_engine #(
     ST_LAUNCH,
     ST_PAYLOAD,
     ST_RELEASE,
+    ST_WAIT_NEXT,
     ST_FAIL
   } state_t;
 
+  typedef enum logic [2:0] {
+    PF_EMPTY,
+    PF_WEIGHT_DESC,
+    PF_WEIGHT_DATA,
+    PF_PATCH_DESC,
+    PF_PATCH_DATA,
+    PF_READY
+  } prefetch_state_t;
+
   state_t state_q;
+  prefetch_state_t prefetch_state_q;
   logic engine_fault_q;
   logic [31:0] service_timeout_q;
 
@@ -126,11 +145,12 @@ module alexnet_m8n126_graph_payload_engine #(
   logic [12:0] scheduler_command_k_count;
   logic scheduler_command_accum_first, scheduler_command_accum_final;
   logic scheduler_command_weight_fill, scheduler_command_weight_release;
-  logic scheduler_command_result_enable;
+  logic scheduler_command_result_enable, scheduler_command_layer_last;
   logic [15:0] scheduler_command_context_tag;
   logic [15:0] scheduler_command_tile_tag;
   logic scheduler_command_done_q, scheduler_command_error_q;
   logic scheduler_busy, scheduler_fault;
+  logic [15:0] scheduler_completed_commands;
 
   logic [3:0] layer_id_q;
   logic mode_split_q;
@@ -142,12 +162,41 @@ module alexnet_m8n126_graph_payload_engine #(
   logic [3:0] group_m_count_q [0:1];
   logic [13:0] k_offset_q;
   logic [12:0] k_count_q;
-  logic accum_first_q, accum_final_q;
+  logic accum_first_q, accum_final_q, layer_last_q;
   logic weight_fill_q, weight_release_q, result_enable_q;
   logic [15:0] weight_context_tag_q, patch_context_tag_q, tile_tag_q;
   logic [7:0] service_bank_enable_q;
   logic [15:0] service_n_lane_mask_q [0:7];
   logic [15:0] patch_m_lane_mask_q;
+
+  logic [3:0] prefetch_layer_id_q;
+  logic prefetch_mode_split_q;
+  logic [7:0] prefetch_bank_enable_q;
+  logic [15:0] prefetch_n_lane_mask_q [0:7];
+  logic [15:0] prefetch_n_base_q;
+  logic [7:0] prefetch_n_count_q;
+  logic [12:0] prefetch_m_base_q;
+  logic [3:0] prefetch_group_m_count_q [0:1];
+  logic [13:0] prefetch_k_offset_q;
+  logic [12:0] prefetch_k_count_q;
+  logic prefetch_accum_first_q, prefetch_accum_final_q;
+  logic prefetch_weight_fill_q, prefetch_weight_release_q;
+  logic prefetch_result_enable_q, prefetch_layer_last_q;
+  logic [15:0] prefetch_weight_context_tag_q;
+  logic [15:0] prefetch_patch_context_tag_q, prefetch_tile_tag_q;
+  logic [7:0] prefetch_service_bank_enable_q;
+  logic [15:0] prefetch_service_n_lane_mask_q [0:7];
+  logic [15:0] prefetch_patch_m_lane_mask_q;
+  logic using_prefetch_service;
+  logic [3:0] fill_layer_id;
+  logic [15:0] fill_n_base;
+  logic [12:0] fill_m_base;
+  logic [13:0] fill_k_offset;
+  logic [12:0] fill_k_count;
+  logic [7:0] fill_bank_enable;
+  logic [15:0] fill_n_lane_mask [0:7];
+  logic [15:0] fill_weight_context_tag, fill_patch_context_tag;
+  logic [15:0] fill_patch_m_lane_mask;
 
   logic weight_fill_valid, weight_fill_ready;
   logic weight_write_ready;
@@ -191,34 +240,66 @@ module alexnet_m8n126_graph_payload_engine #(
   logic payload_fault;
   logic launch_fire;
 
-  assign scheduler_command_ready = state_q == ST_IDLE && !fault;
+  assign scheduler_command_ready = !fault &&
+      (state_q == ST_IDLE ||
+       ((state_q == ST_PAYLOAD || state_q == ST_WAIT_NEXT) &&
+        !layer_last_q && prefetch_state_q == PF_EMPTY));
   assign busy = scheduler_busy || state_q != ST_IDLE;
   assign fault = engine_fault_q || scheduler_fault || payload_fault ||
                  weight_context_error || weight_protocol_error ||
                  patch_context_error || patch_protocol_error;
 
-  assign weight_request_valid = state_q == ST_WEIGHT_DESC &&
-                                weight_fill_ready;
-  assign weight_fill_valid = state_q == ST_WEIGHT_DESC &&
-                             weight_request_ready;
-  assign weight_axis_ready = state_q == ST_WEIGHT_DATA &&
-                             weight_write_ready;
-  assign weight_request_layer_id = layer_id_q;
-  assign weight_request_n_base = n_base_q;
-  assign weight_request_k_offset = k_offset_q;
-  assign weight_request_k_count = k_count_q;
-  assign weight_request_bank_enable = service_bank_enable_q;
-  assign weight_request_context_tag = weight_context_tag_q;
+  assign using_prefetch_service = prefetch_state_q == PF_WEIGHT_DESC ||
+      prefetch_state_q == PF_WEIGHT_DATA ||
+      prefetch_state_q == PF_PATCH_DESC ||
+      prefetch_state_q == PF_PATCH_DATA;
+  assign fill_layer_id = using_prefetch_service ? prefetch_layer_id_q :
+                                                  layer_id_q;
+  assign fill_n_base = using_prefetch_service ? prefetch_n_base_q : n_base_q;
+  assign fill_m_base = using_prefetch_service ? prefetch_m_base_q : m_base_q;
+  assign fill_k_offset = using_prefetch_service ? prefetch_k_offset_q :
+                                                  k_offset_q;
+  assign fill_k_count = using_prefetch_service ? prefetch_k_count_q : k_count_q;
+  assign fill_bank_enable = using_prefetch_service ?
+      prefetch_service_bank_enable_q : service_bank_enable_q;
+  assign fill_weight_context_tag = using_prefetch_service ?
+      prefetch_weight_context_tag_q : weight_context_tag_q;
+  assign fill_patch_context_tag = using_prefetch_service ?
+      prefetch_patch_context_tag_q : patch_context_tag_q;
+  assign fill_patch_m_lane_mask = using_prefetch_service ?
+      prefetch_patch_m_lane_mask_q : patch_m_lane_mask_q;
 
-  assign patch_request_valid = state_q == ST_PATCH_DESC && patch_fill_ready;
-  assign patch_fill_valid = state_q == ST_PATCH_DESC && patch_request_ready;
-  assign patch_axis_ready = state_q == ST_PATCH_DATA && patch_write_ready;
-  assign patch_request_layer_id = layer_id_q;
-  assign patch_request_m_base = m_base_q;
-  assign patch_request_k_offset = k_offset_q;
-  assign patch_request_k_count = k_count_q;
-  assign patch_request_m_lane_mask = patch_m_lane_mask_q;
-  assign patch_request_context_tag = patch_context_tag_q;
+  assign weight_request_valid =
+      (state_q == ST_WEIGHT_DESC || prefetch_state_q == PF_WEIGHT_DESC) &&
+      weight_fill_ready;
+  assign weight_fill_valid =
+      (state_q == ST_WEIGHT_DESC || prefetch_state_q == PF_WEIGHT_DESC) &&
+      weight_request_ready;
+  assign weight_axis_ready =
+      (state_q == ST_WEIGHT_DATA || prefetch_state_q == PF_WEIGHT_DATA) &&
+      weight_write_ready;
+  assign weight_request_layer_id = fill_layer_id;
+  assign weight_request_n_base = fill_n_base;
+  assign weight_request_k_offset = fill_k_offset;
+  assign weight_request_k_count = fill_k_count;
+  assign weight_request_bank_enable = fill_bank_enable;
+  assign weight_request_context_tag = fill_weight_context_tag;
+
+  assign patch_request_valid =
+      (state_q == ST_PATCH_DESC || prefetch_state_q == PF_PATCH_DESC) &&
+      patch_fill_ready;
+  assign patch_fill_valid =
+      (state_q == ST_PATCH_DESC || prefetch_state_q == PF_PATCH_DESC) &&
+      patch_request_ready;
+  assign patch_axis_ready =
+      (state_q == ST_PATCH_DATA || prefetch_state_q == PF_PATCH_DATA) &&
+      patch_write_ready;
+  assign patch_request_layer_id = fill_layer_id;
+  assign patch_request_m_base = fill_m_base;
+  assign patch_request_k_offset = fill_k_offset;
+  assign patch_request_k_count = fill_k_count;
+  assign patch_request_m_lane_mask = fill_patch_m_lane_mask;
+  assign patch_request_context_tag = fill_patch_context_tag;
 
   assign payload_command_valid = state_q == ST_LAUNCH &&
       patch_replay_ready && weight_replay_ready;
@@ -239,12 +320,17 @@ module alexnet_m8n126_graph_payload_engine #(
     end
     for (int bank = 0; bank < 8; bank++) begin
       weight_request_n_lane_mask[bank] = service_n_lane_mask_q[bank];
+      fill_n_lane_mask[bank] = using_prefetch_service ?
+          prefetch_service_n_lane_mask_q[bank] :
+          service_n_lane_mask_q[bank];
+      weight_request_n_lane_mask[bank] = fill_n_lane_mask[bank];
     end
   end
 
   always_ff @(posedge clk) begin
     if (rst) begin
       state_q <= ST_IDLE;
+      prefetch_state_q <= PF_EMPTY;
       engine_fault_q <= 1'b0;
       service_timeout_q <= '0;
       scheduler_command_done_q <= 1'b0;
@@ -261,6 +347,7 @@ module alexnet_m8n126_graph_payload_engine #(
       k_count_q <= '0;
       accum_first_q <= 1'b0;
       accum_final_q <= 1'b0;
+      layer_last_q <= 1'b0;
       weight_fill_q <= 1'b0;
       weight_release_q <= 1'b0;
       result_enable_q <= 1'b0;
@@ -268,18 +355,42 @@ module alexnet_m8n126_graph_payload_engine #(
       patch_context_tag_q <= '0;
       tile_tag_q <= '0;
       service_bank_enable_q <= '0;
+      prefetch_layer_id_q <= '0;
+      prefetch_mode_split_q <= 1'b0;
+      prefetch_bank_enable_q <= '0;
+      prefetch_n_base_q <= '0;
+      prefetch_n_count_q <= '0;
+      prefetch_m_base_q <= '0;
+      prefetch_group_m_count_q[0] <= '0;
+      prefetch_group_m_count_q[1] <= '0;
+      prefetch_k_offset_q <= '0;
+      prefetch_k_count_q <= '0;
+      prefetch_accum_first_q <= 1'b0;
+      prefetch_accum_final_q <= 1'b0;
+      prefetch_weight_fill_q <= 1'b0;
+      prefetch_weight_release_q <= 1'b0;
+      prefetch_result_enable_q <= 1'b0;
+      prefetch_layer_last_q <= 1'b0;
+      prefetch_weight_context_tag_q <= '0;
+      prefetch_patch_context_tag_q <= '0;
+      prefetch_tile_tag_q <= '0;
+      prefetch_patch_m_lane_mask_q <= '0;
+      prefetch_service_bank_enable_q <= '0;
       weight_words_loaded <= '0;
       patch_words_loaded <= '0;
       completed_result_slices <= '0;
+      completed_commands <= '0;
       for (int bank = 0; bank < 8; bank++) begin
         n_lane_mask_q[bank] <= '0;
         service_n_lane_mask_q[bank] <= '0;
+        prefetch_n_lane_mask_q[bank] <= '0;
+        prefetch_service_n_lane_mask_q[bank] <= '0;
       end
     end else begin
       scheduler_command_done_q <= 1'b0;
       scheduler_command_error_q <= 1'b0;
 
-      if (state_q == ST_IDLE)
+      if (state_q == ST_IDLE || launch_fire)
         service_timeout_q <= '0;
       else if (service_timeout_q != SERVICE_TIMEOUT_CYCLES)
         service_timeout_q <= service_timeout_q + 1'b1;
@@ -290,8 +401,14 @@ module alexnet_m8n126_graph_payload_engine #(
         patch_words_loaded <= patch_words_loaded + 1'b1;
       if (result_valid && result_ready)
         completed_result_slices <= completed_result_slices + 1'b1;
+      if (start_valid && start_ready)
+        completed_commands <= '0;
+      if (state_q == ST_PAYLOAD && payload_done &&
+          !payload_error && !payload_fault)
+        completed_commands <= completed_commands + 1'b1;
 
-      if (scheduler_command_valid && scheduler_command_ready) begin
+      if (scheduler_command_valid && scheduler_command_ready &&
+          state_q == ST_IDLE) begin
         layer_id_q <= scheduler_command_layer_id;
         mode_split_q <= scheduler_command_mode_split_n64;
         bank_enable_q <= scheduler_command_bank_enable;
@@ -304,6 +421,7 @@ module alexnet_m8n126_graph_payload_engine #(
         k_count_q <= scheduler_command_k_count;
         accum_first_q <= scheduler_command_accum_first;
         accum_final_q <= scheduler_command_accum_final;
+        layer_last_q <= scheduler_command_layer_last;
         weight_fill_q <= scheduler_command_weight_fill;
         weight_release_q <= scheduler_command_weight_release;
         result_enable_q <= scheduler_command_result_enable;
@@ -324,7 +442,63 @@ module alexnet_m8n126_graph_payload_engine #(
         end
         state_q <= scheduler_command_weight_fill ? ST_WEIGHT_DESC :
                                                     ST_PATCH_DESC;
+      end else if (scheduler_command_valid && scheduler_command_ready) begin
+        prefetch_layer_id_q <= scheduler_command_layer_id;
+        prefetch_mode_split_q <= scheduler_command_mode_split_n64;
+        prefetch_bank_enable_q <= scheduler_command_bank_enable;
+        prefetch_n_base_q <= scheduler_command_n_base;
+        prefetch_n_count_q <= scheduler_command_n_count;
+        prefetch_m_base_q <= scheduler_command_m_base;
+        prefetch_group_m_count_q[0] <=
+            scheduler_command_group0_m_count;
+        prefetch_group_m_count_q[1] <=
+            scheduler_command_group1_m_count;
+        for (int lane = 0; lane < 8; lane++) begin
+          prefetch_patch_m_lane_mask_q[lane] <=
+              lane < scheduler_command_group0_m_count;
+          prefetch_patch_m_lane_mask_q[lane+8] <=
+              lane < scheduler_command_group1_m_count;
+        end
+        prefetch_k_offset_q <= scheduler_command_k_offset;
+        prefetch_k_count_q <= scheduler_command_k_count;
+        prefetch_accum_first_q <= scheduler_command_accum_first;
+        prefetch_accum_final_q <= scheduler_command_accum_final;
+        prefetch_weight_fill_q <= scheduler_command_weight_fill;
+        prefetch_weight_release_q <= scheduler_command_weight_release;
+        prefetch_result_enable_q <= scheduler_command_result_enable;
+        prefetch_layer_last_q <= scheduler_command_layer_last;
+        prefetch_weight_context_tag_q <= scheduler_command_context_tag;
+        prefetch_patch_context_tag_q <= scheduler_command_tile_tag ^
+                                        {2'b00, scheduler_command_k_offset};
+        prefetch_tile_tag_q <= scheduler_command_tile_tag;
+        prefetch_service_bank_enable_q <=
+            scheduler_command_mode_split_n64 ?
+            (scheduler_command_bank_enable & 8'h0f) :
+            scheduler_command_bank_enable;
+        for (int bank = 0; bank < 8; bank++) begin
+          prefetch_n_lane_mask_q[bank] <=
+              scheduler_command_n_lane_mask[bank];
+          if (scheduler_command_mode_split_n64 && bank >= 4)
+            prefetch_service_n_lane_mask_q[bank] <= '0;
+          else
+            prefetch_service_n_lane_mask_q[bank] <=
+                scheduler_command_n_lane_mask[bank];
+        end
+        prefetch_state_q <= scheduler_command_weight_fill ?
+                            PF_WEIGHT_DESC : PF_PATCH_DESC;
       end
+
+      case (prefetch_state_q)
+        PF_WEIGHT_DESC: if (weight_request_valid && weight_request_ready)
+          prefetch_state_q <= PF_WEIGHT_DATA;
+        PF_WEIGHT_DATA: if (weight_fill_done)
+          prefetch_state_q <= PF_PATCH_DESC;
+        PF_PATCH_DESC: if (patch_request_valid && patch_request_ready)
+          prefetch_state_q <= PF_PATCH_DATA;
+        PF_PATCH_DATA: if (patch_fill_done)
+          prefetch_state_q <= PF_READY;
+        default: ;
+      endcase
 
       case (state_q)
         ST_WEIGHT_DESC: if (weight_request_valid && weight_request_ready)
@@ -339,8 +513,14 @@ module alexnet_m8n126_graph_payload_engine #(
         ST_PATCH_DATA: if (patch_fill_done)
           state_q <= ST_LAUNCH;
 
-        ST_LAUNCH: if (launch_fire)
+        ST_LAUNCH: if (launch_fire) begin
+          // Non-boundary descriptors retire at launch.  The scheduler can
+          // describe one look-ahead tile while this payload is computing;
+          // the final descriptor of a layer remains a hard completion fence.
+          if (!layer_last_q)
+            scheduler_command_done_q <= 1'b1;
           state_q <= ST_PAYLOAD;
+        end
 
         ST_PAYLOAD: if (payload_done) begin
           if (payload_error || payload_fault) begin
@@ -350,15 +530,51 @@ module alexnet_m8n126_graph_payload_engine #(
             state_q <= ST_FAIL;
           end else if (weight_release_q) begin
             state_q <= ST_RELEASE;
-          end else begin
+          end else if (layer_last_q) begin
             scheduler_command_done_q <= 1'b1;
             state_q <= ST_IDLE;
+          end else begin
+            state_q <= ST_WAIT_NEXT;
           end
         end
 
         ST_RELEASE: if (weight_release_valid && weight_release_ready) begin
-          scheduler_command_done_q <= 1'b1;
-          state_q <= ST_IDLE;
+          if (layer_last_q) begin
+            scheduler_command_done_q <= 1'b1;
+            state_q <= ST_IDLE;
+          end else begin
+            state_q <= ST_WAIT_NEXT;
+          end
+        end
+
+        ST_WAIT_NEXT: if (prefetch_state_q == PF_READY) begin
+          layer_id_q <= prefetch_layer_id_q;
+          mode_split_q <= prefetch_mode_split_q;
+          bank_enable_q <= prefetch_bank_enable_q;
+          n_base_q <= prefetch_n_base_q;
+          n_count_q <= prefetch_n_count_q;
+          m_base_q <= prefetch_m_base_q;
+          group_m_count_q[0] <= prefetch_group_m_count_q[0];
+          group_m_count_q[1] <= prefetch_group_m_count_q[1];
+          k_offset_q <= prefetch_k_offset_q;
+          k_count_q <= prefetch_k_count_q;
+          accum_first_q <= prefetch_accum_first_q;
+          accum_final_q <= prefetch_accum_final_q;
+          layer_last_q <= prefetch_layer_last_q;
+          weight_fill_q <= prefetch_weight_fill_q;
+          weight_release_q <= prefetch_weight_release_q;
+          result_enable_q <= prefetch_result_enable_q;
+          weight_context_tag_q <= prefetch_weight_context_tag_q;
+          patch_context_tag_q <= prefetch_patch_context_tag_q;
+          tile_tag_q <= prefetch_tile_tag_q;
+          service_bank_enable_q <= prefetch_service_bank_enable_q;
+          for (int bank = 0; bank < 8; bank++) begin
+            n_lane_mask_q[bank] <= prefetch_n_lane_mask_q[bank];
+            service_n_lane_mask_q[bank] <=
+                prefetch_service_n_lane_mask_q[bank];
+          end
+          prefetch_state_q <= PF_EMPTY;
+          state_q <= ST_LAUNCH;
         end
 
         ST_FAIL: state_q <= ST_FAIL;
@@ -385,6 +601,9 @@ module alexnet_m8n126_graph_payload_engine #(
 
   alexnet_m8n126_graph_scheduler u_scheduler (
       .clk, .rst, .start_valid, .start_ready, .start_tag,
+      .start_layer_id, .stop_layer_id, .fc_batch_size, .start_n_base,
+      .start_single_n_tile, .start_weight_fill_enable,
+      .start_weight_release_enable, .start_pool_enable,
       .command_valid(scheduler_command_valid),
       .command_ready(scheduler_command_ready),
       .command_layer_id(scheduler_command_layer_id),
@@ -405,6 +624,7 @@ module alexnet_m8n126_graph_payload_engine #(
       .command_weight_fill(scheduler_command_weight_fill),
       .command_weight_release(scheduler_command_weight_release),
       .command_result_enable(scheduler_command_result_enable),
+      .command_layer_last(scheduler_command_layer_last),
       .command_context_tag(scheduler_command_context_tag),
       .command_tile_tag(scheduler_command_tile_tag),
       .command_done(scheduler_command_done_q),
@@ -412,16 +632,19 @@ module alexnet_m8n126_graph_payload_engine #(
       .layer_complete_valid, .layer_complete_ready, .layer_complete_id,
       .layer_complete_requires_pool,
       .busy(scheduler_busy), .inference_done, .inference_failed,
-      .fault(scheduler_fault), .active_layer_id, .completed_commands
+      .fault(scheduler_fault), .active_layer_id,
+      .completed_commands(scheduler_completed_commands)
   );
 
   alexnet_n128_weight_pingpong u_weight_pingpong (
       .clk, .rst,
       .fill_valid(weight_fill_valid), .fill_ready(weight_fill_ready),
-      .fill_k_count(k_count_q), .fill_bank_enable(service_bank_enable_q),
-      .fill_n_lane_mask(service_n_lane_mask_q),
-      .fill_context_tag(weight_context_tag_q),
-      .write_valid(weight_axis_valid && state_q == ST_WEIGHT_DATA),
+      .fill_k_count(fill_k_count), .fill_bank_enable(fill_bank_enable),
+      .fill_n_lane_mask(fill_n_lane_mask),
+      .fill_context_tag(fill_weight_context_tag),
+      .write_valid(weight_axis_valid &&
+                   (state_q == ST_WEIGHT_DATA ||
+                    prefetch_state_q == PF_WEIGHT_DATA)),
       .write_ready(weight_write_ready), .write_values(weight_axis_data),
       .write_last(weight_axis_last), .write_k(), .write_bank_slot(),
       .replay_valid(weight_replay_valid), .replay_ready(weight_replay_ready),
@@ -450,9 +673,11 @@ module alexnet_m8n126_graph_payload_engine #(
   alexnet_m16_patch_pingpong u_patch_pingpong (
       .clk, .rst,
       .fill_valid(patch_fill_valid), .fill_ready(patch_fill_ready),
-      .fill_k_count(k_count_q), .fill_m_lane_mask(patch_m_lane_mask_q),
-      .fill_context_tag(patch_context_tag_q),
-      .write_valid(patch_axis_valid && state_q == ST_PATCH_DATA),
+      .fill_k_count(fill_k_count), .fill_m_lane_mask(fill_patch_m_lane_mask),
+      .fill_context_tag(fill_patch_context_tag),
+      .write_valid(patch_axis_valid &&
+                   (state_q == ST_PATCH_DATA ||
+                    prefetch_state_q == PF_PATCH_DATA)),
       .write_ready(patch_write_ready), .write_values(patch_axis_data),
       .write_last(patch_axis_last), .write_k(),
       .replay_valid(patch_replay_valid), .replay_ready(patch_replay_ready),
@@ -523,10 +748,10 @@ module alexnet_m8n126_graph_payload_engine #(
         $fatal(1, "split descriptor did not expose all physical banks");
       if (weight_axis_valid && weight_axis_ready &&
           weight_axis_last != (weight_words_written + 1'b1 ==
-              k_count_q * $countones(service_bank_enable_q)))
+              fill_k_count * $countones(fill_bank_enable)))
         $fatal(1, "graph weight stream TLAST mismatch");
       if (patch_axis_valid && patch_axis_ready &&
-          patch_axis_last != (patch_words_written + 1'b1 == k_count_q))
+          patch_axis_last != (patch_words_written + 1'b1 == fill_k_count))
         $fatal(1, "graph patch stream TLAST mismatch");
     end
   end

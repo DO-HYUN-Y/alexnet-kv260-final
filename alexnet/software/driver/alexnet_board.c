@@ -23,7 +23,7 @@
 #define ALEXNET_DRIVER_ABI_VERSION 2u
 #define ALEXNET_PL0_INPUT_MIN_HZ 90000000u
 #define ALEXNET_PL0_INPUT_MAX_HZ 110000000u
-#define ALEXNET_FABRIC_CLOCK_HZ 199998002u
+#define ALEXNET_FABRIC_CLOCK_HZ 184998151u
 #define ALEXNET_FABRIC_CLOCK_TOLERANCE_HZ 5000u
 
 struct alexnet_board_dev {
@@ -270,7 +270,7 @@ static int alexnet_probe(struct platform_device *pdev)
     if (clock_delta > ALEXNET_FABRIC_CLOCK_TOLERANCE_HZ)
         return dev_err_probe(
             &pdev->dev, -ERANGE,
-            "fabric clock metadata %u Hz does not match required 200 MHz\n",
+            "fabric clock metadata %u Hz does not match required 185 MHz\n",
             fabric_clock_hz);
     adev->pl_clock_hz = fabric_clock_hz;
     ret = clk_prepare_enable(adev->pl_clk);

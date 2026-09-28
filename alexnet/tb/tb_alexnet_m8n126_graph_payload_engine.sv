@@ -5,6 +5,10 @@ module tb_alexnet_m8n126_graph_payload_engine;
   logic rst;
   logic start_valid, start_ready;
   logic [15:0] start_tag;
+  logic [3:0] start_layer_id, stop_layer_id, fc_batch_size;
+  logic [15:0] start_n_base;
+  logic start_single_n_tile, start_weight_fill_enable;
+  logic start_weight_release_enable, start_pool_enable;
 
   logic weight_request_valid, weight_request_ready;
   logic [3:0] weight_request_layer_id;
@@ -111,8 +115,10 @@ module tb_alexnet_m8n126_graph_payload_engine;
           patch_request_m_base != expected_m_base ||
           patch_request_k_offset != 0 || patch_request_k_count != 363 ||
           patch_request_m_lane_mask != 16'hffff)
-        $fatal(1, "unexpected Conv1 patch request m_base=%0d",
-               expected_m_base);
+        $fatal(1, "unexpected Conv1 patch request expected_m=%0d got layer=%0d m=%0d k_offset=%0d k_count=%0d mask=%h",
+               expected_m_base, patch_request_layer_id,
+               patch_request_m_base, patch_request_k_offset,
+               patch_request_k_count, patch_request_m_lane_mask);
       @(posedge clk);
 
       for (int k = 0; k < 363; k++) begin
@@ -198,6 +204,14 @@ module tb_alexnet_m8n126_graph_payload_engine;
     layer_complete_ready = 1'b0;
     start_valid = 1'b0;
     start_tag = 16'h6200;
+    start_layer_id = 1;
+    stop_layer_id = 8;
+    fc_batch_size = 1;
+    start_n_base = 0;
+    start_single_n_tile = 1'b0;
+    start_weight_fill_enable = 1'b1;
+    start_weight_release_enable = 1'b1;
+    start_pool_enable = 1'b1;
     weight_request_ready = 1'b1;
     weight_axis_valid = 1'b0;
     weight_axis_data = '0;
@@ -222,9 +236,9 @@ module tb_alexnet_m8n126_graph_payload_engine;
 
     send_weight_fill();
     send_patch_fill(0);
-    wait (completed_commands == 1);
 
-    // The second M16 tile must reuse the resident Conv1 N64 weight set.
+    // The second M16 tile must reuse the resident Conv1 N64 weight set, and
+    // its patch fill begins before the first payload physically completes.
     fork
       begin
         wait (weight_request_valid);

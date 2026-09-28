@@ -107,7 +107,7 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
 
   logic [127:0] input_memory [0:INPUT_BEATS-1];
   logic [127:0] weight_memory [0:WEIGHT_BEATS-1];
-  logic [127:0] parameter_memory [0:CONV1_PARAMETER_BEATS-1];
+  logic [127:0] parameter_memory [0:PARAMETER_IMAGE_BYTES/16-1];
   logic [63:0] expected_result_rows [0:CONV1_RESULT_ROWS-1];
   bit result_row_seen [0:CONV1_RESULT_ROWS-1];
   logic [7:0] activation_a_memory [0:ACT_MEMORY_BYTES-1];
@@ -378,9 +378,9 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
                          weight_transfer_index < WEIGHT_BEATS ?
         weight_memory[weight_transfer_index] :
         weight_mm2s_address >= PARAMETER_BASE &&
-        weight_mm2s_address < PARAMETER_BASE + 64 * 16 &&
+        weight_mm2s_address < PARAMETER_BASE + PARAMETER_IMAGE_BYTES &&
         ((weight_mm2s_address - PARAMETER_BASE) >> 4) +
-            weight_transfer_index < CONV1_PARAMETER_BEATS ?
+            weight_transfer_index < PARAMETER_IMAGE_BYTES/16 ?
         parameter_memory[((weight_mm2s_address - PARAMETER_BASE) >> 4) +
                          weight_transfer_index] :
         '0;
@@ -492,13 +492,10 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
             main_s2mm_beats = (committed_data + 15) / 16;
             if ((!full_conv1 && !full_graph &&
                  (main_s2mm_address != ACT_A_BASE ||
-                  committed_data != 64)) ||
+                  committed_data != 193600)) ||
                 (full_conv1 && !full_graph &&
-                 (main_s2mm_address < ACT_A_BASE ||
-                  main_s2mm_address + committed_data >
-                      ACT_A_BASE + 193600 ||
-                  main_s2mm_address[2:0] != 0 ||
-                  (committed_data != 64 && committed_data != 8))) ||
+                 (main_s2mm_address != ACT_A_BASE ||
+                  committed_data != 193600)) ||
                 (full_graph &&
                  !((main_s2mm_address >= ACT_A_BASE &&
                     main_s2mm_address + committed_data <=
@@ -693,9 +690,9 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
                    committed_data == 4 * 363 * 16) ||
                   (weight_mm2s_address >= PARAMETER_BASE &&
                    weight_mm2s_address + committed_data <=
-                       PARAMETER_BASE + 64 * 16 &&
+                       PARAMETER_BASE + PARAMETER_IMAGE_BYTES &&
                    weight_mm2s_address[3:0] == 0 &&
-                   committed_data == 128))) ||
+                   committed_data == PARAMETER_IMAGE_BYTES))) ||
                 (full_graph &&
                  !((weight_mm2s_address >= WEIGHT_BASE &&
                     weight_mm2s_address + committed_data <=
@@ -812,7 +809,7 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
       $fatal(1, "VECTOR_ROOT plusarg is required");
     if (full_graph && !$value$plusargs("BOARD_ROOT=%s", board_root))
       $fatal(1, "BOARD_ROOT plusarg is required for FULL_GRAPH");
-    for (int beat = 0; beat < CONV1_PARAMETER_BEATS; beat++)
+    for (int beat = 0; beat < PARAMETER_IMAGE_BYTES/16; beat++)
       parameter_memory[beat] = 0;
     for (int row = 0; row < CONV1_RESULT_ROWS; row++) begin
       expected_result_rows[row] = 0;
@@ -930,22 +927,24 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
       @(negedge clk);
       if (accelerator_fault)
         $fatal(1,
-               "trained graph top fault state=%0d layer=%0d main=%0d weight=%0d service=%0b engine_fault=%0b failed=%0b main_error=%0b weight_error=%0b loader=%0b raster=%0b pool=%0b activation=%0b mapping=%0b completed=%0d s2mm=%0d slices=%0d result_index=%0d pending_m=%0d engine_m=%0d n=%0d payload_state=%0d",
+               "trained graph top fault state=%0d layer=%0d main=%0d weight=%0d service=%0b engine_fault=%0b failed=%0b main_error=%0b weight_error=%0b loader=%0b raster=%0b pool=%0b activation=%0b cache=%0b coalescer=%0b completed=%0d s2mm=%0d slices=%0d coalesced=%0d engine_m=%0d n=%0d payload_state=%0d",
                dut.main_state_q, dut.engine_active_layer_id,
                {dut.unused_main_s2mm_state, dut.unused_main_mm2s_state},
                dut.unused_weight_dma_state, dut.service_fault_q,
                dut.engine_fault, dut.engine_failed, dut.main_dma_error,
                dut.weight_dma_error, dut.loader_fault, dut.raster_fault,
                dut.pool_layer_error, dut.activation_fault,
-               dut.result_mapping_error, dut.engine_completed_commands,
+               dut.parameter_cache_fault, dut.result_coalescer_fault,
+               dut.engine_completed_commands,
                main_completed_s2mm, dut.completed_result_slices,
-               dut.result_slice_index_q, dut.pending_result_m_base_q,
+               dut.result_coalescer_completed_tiles,
                dut.engine_result_m_base, dut.engine_result_n_base,
                dut.u_graph_payload.state_q);
       if (!full_conv1 && !full_graph && main_completed_s2mm == 1) begin
         if (weight_completed_transfers != 2 ||
-            dut.engine_completed_commands != 0 ||
-            dut.engine_issue_cycles != 363)
+            dut.engine_completed_commands != CONV1_COMMANDS ||
+            dut.engine_issue_cycles != CONV1_ISSUES ||
+            dut.parameter_cache_completed_replays != CONV1_RESULT_TRANSFERS)
           $fatal(1,
                  "trained top checkpoint accounting mm2s=%0d s2mm=%0d weight=%0d commands=%0d issues=%0d",
                  main_completed_mm2s, main_completed_s2mm,
@@ -958,12 +957,14 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
         $finish;
       end
       if (full_conv1 && !full_graph &&
-          dut.engine_completed_commands == CONV1_COMMANDS) begin
+          dut.engine_completed_commands == CONV1_COMMANDS &&
+          dut.result_coalescer_completed_tiles == 1) begin
         if (main_completed_mm2s != 1 ||
-            main_completed_s2mm != CONV1_RESULT_TRANSFERS ||
-            weight_completed_transfers != CONV1_RESULT_TRANSFERS + 1 ||
+            main_completed_s2mm != 1 ||
+            weight_completed_transfers != 2 ||
             dut.engine_issue_cycles != CONV1_ISSUES ||
-            dut.completed_result_slices != CONV1_RESULT_TRANSFERS)
+            dut.completed_result_slices != CONV1_RESULT_TRANSFERS ||
+            dut.parameter_cache_completed_replays != CONV1_RESULT_TRANSFERS)
           $fatal(1,
                  "full Conv1 accounting mm2s=%0d s2mm=%0d weight=%0d commands=%0d issues=%0d slices=%0d",
                  main_completed_mm2s, main_completed_s2mm,
@@ -991,6 +992,16 @@ module tb_alexnet_m8n126_graph_top_trained_conv1_smoke;
                  dut.engine_completed_commands, dut.engine_issue_cycles,
                  dut.useful_mac_count, dut.physical_mac_slot_count,
                  weight_payload_bytes, dut.weight_byte_offset_q);
+        if (dut.ddr_read_bytes_q != 64'd62271680 ||
+            dut.ddr_write_bytes_q != 64'd582504 ||
+            dut.main_read_bytes_q + dut.weight_read_bytes_q +
+                dut.camera_read_bytes_q != dut.ddr_read_bytes_q ||
+            dut.camera_read_bytes_q != 0)
+          $fatal(1,
+                 "DDR byte counters read=%0d write=%0d main=%0d weight=%0d camera=%0d",
+                 dut.ddr_read_bytes_q, dut.ddr_write_bytes_q,
+                 dut.main_read_bytes_q, dut.weight_read_bytes_q,
+                 dut.camera_read_bytes_q);
         for (int row = 0; row < CONV1_RESULT_ROWS; row++)
           if (!result_row_seen[row])
             $fatal(1, "full graph missing Conv1 row=%0d", row);

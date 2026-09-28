@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 software_dir=$(cd "${script_dir}/.." && pwd)
 project_dir=$(cd "${software_dir}/../.." && pwd)
-bitstream="${project_dir}/alexnet/stages/01_kv260_m4n8/build/output/alexnet_m4n8_kv260.bit"
+bitstream="${ALEXNET_BITSTREAM:-${project_dir}/release/alexnet_m8n126_graph_kv260_ddr_counters.bit}"
 build_dir="${software_dir}/build/firmware"
 
 if [[ ! -f "${bitstream}" ]]; then
@@ -35,7 +35,7 @@ else
 fi
 
 mkdir -p "${build_dir}"
-cp "${bitstream}" "${build_dir}/alexnet_m4n8_kv260.bit"
+cp "${bitstream}" "${build_dir}/alexnet_m8n126_graph_kv260.bit"
 cp "${software_dir}/firmware/alexnet_kv260.bif" \
     "${build_dir}/alexnet_kv260.bif"
 
@@ -46,12 +46,17 @@ cp "${software_dir}/firmware/alexnet_kv260.bif" \
 )
 
 "${dtc_bin}" -@ -I dts -O dtb \
-    -o "${build_dir}/alexnet_m4n8_kv260.dtbo" \
+    -o "${build_dir}/alexnet_m8n126_graph_kv260.dtbo" \
     "${software_dir}/overlay/alexnet_kv260.dts"
 
-test -s "${build_dir}/alexnet_m4n8_kv260.bit.bin"
-test -s "${build_dir}/alexnet_m4n8_kv260.dtbo"
-sha256sum \
-    "${build_dir}/alexnet_m4n8_kv260.bit.bin" \
-    "${build_dir}/alexnet_m4n8_kv260.dtbo"
+test -s "${build_dir}/alexnet_m8n126_graph_kv260.bit.bin"
+test -s "${build_dir}/alexnet_m8n126_graph_kv260.dtbo"
+(
+    cd "${build_dir}"
+    sha256sum \
+        alexnet_m8n126_graph_kv260.bit.bin \
+        alexnet_m8n126_graph_kv260.dtbo \
+        > alexnet_m8n126_graph_kv260.SHA256SUMS
+    sha256sum -c alexnet_m8n126_graph_kv260.SHA256SUMS
+)
 echo "ALEXNET_KV260_FIRMWARE_PACKAGE_PASS"

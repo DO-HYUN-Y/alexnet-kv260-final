@@ -12,23 +12,28 @@ import struct
 import time
 
 
-DMA_USED_BYTES = 62_024_960
+DMA_USED_BYTES = 68_768_000
 DMA_BUFFER_BYTES = (
     (DMA_USED_BYTES + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
 )
 INPUT_OFFSET = 0
+BATCH_SIZE = 8
 INPUT_BYTES = 401_408
-ACTIVATION_A_OFFSET = 401_408
-ACTIVATION_A_BYTES = 193_664
-ACTIVATION_B_OFFSET = 595_072
-ACTIVATION_B_BYTES = 140_032
-WEIGHTS_OFFSET = 735_104
+INPUT_ALLOC_BYTES = BATCH_SIZE * INPUT_BYTES
+ACTIVATION_IMAGE_STRIDE = 262_144
+BATCH_ACTIVATION_OFFSET = BATCH_SIZE * ACTIVATION_IMAGE_STRIDE
+ACTIVATION_A_OFFSET = 3_211_264
+ACTIVATION_A_BYTES = 2_129_920
+ACTIVATION_B_OFFSET = 5_341_184
+ACTIVATION_B_BYTES = 2_129_920
+WEIGHTS_OFFSET = 7_471_104
 WEIGHTS_BYTES = 61_123_264
-PARAMETERS_OFFSET = 61_858_432
+PARAMETERS_OFFSET = 68_594_432
 PARAMETERS_BYTES = 165_504
-OUTPUT_OFFSET = 62_023_936
-OUTPUT_VALID_BYTES = 1_000
-OUTPUT_ALLOC_BYTES = 1_024
+OUTPUT_OFFSET = 68_759_936
+OUTPUT_IMAGE_BYTES = 1_000
+OUTPUT_VALID_BYTES = BATCH_SIZE * OUTPUT_IMAGE_BYTES
+OUTPUT_ALLOC_BYTES = 8_064
 BASE_ALIGNMENT = 128
 
 REG_ID = 0x00
@@ -49,6 +54,30 @@ REG_IRQ_ENABLE = 0x60
 REG_IRQ_STATUS = 0x64
 REG_CONFIG_STATUS = 0x78
 REG_BUILD_CONFIG = 0x7C
+REG_PERF_ACTIVE = 0x80
+REG_PERF_ISSUE = 0x84
+REG_PERF_WEIGHT_STALL = 0x88
+REG_PERF_ACT_STALL = 0x8C
+REG_PERF_RESULT_STALL = 0x90
+REG_PERF_USEFUL_MAC_LO = 0x94
+REG_PERF_PEAK_MAC_LO = 0x9C
+REG_PERF_SIGNATURE = 0xA4
+REG_PERF_TILES = 0xA8
+REG_DDR_READ_BYTES_LO = 0xAC
+REG_DDR_WRITE_BYTES_LO = 0xB4
+REG_MAIN_READ_BYTES_LO = 0xBC
+REG_WEIGHT_READ_BYTES_LO = 0xC4
+REG_CAMERA_READ_BYTES_LO = 0xCC
+REG_PIPELINE_TOTAL = 0xD4
+REG_PIPELINE_ENGINE = 0xD8
+REG_PIPELINE_WEIGHT = 0xDC
+REG_PIPELINE_PATCH = 0xE0
+REG_PIPELINE_POOL = 0xE4
+REG_PIPELINE_RESULT = 0xE8
+REG_PIPELINE_RASTER = 0xEC
+REG_PIPELINE_DMA = 0xF0
+REG_PIPELINE_OVERLAP = 0xF4
+REG_PIPELINE_IDLE = 0xF8
 
 CONTROL_SUBMIT = 1 << 0
 CONTROL_CLEAR_STATUS = 1 << 1
@@ -57,8 +86,8 @@ STATUS_DONE = 1 << 3
 STATUS_FAILED = 1 << 4
 STATUS_FAULT = 1 << 5
 STATUS_DMA_ERROR = 1 << 8
-EXPECTED_ID = 0x414C0100
-EXPECTED_BUILD_CONFIG = 0x080800C8
+EXPECTED_ID = 0x4D388500
+EXPECTED_BUILD_CONFIG = 0x087E00B9
 EXPECTED_CHECKPOINT_SHA256 = (
     "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02"
 )
@@ -208,8 +237,110 @@ class AlexNetBoard:
         self.write_reg(REG_SPACE_ACCELERATOR, low_offset, address)
         self.write_reg(REG_SPACE_ACCELERATOR, low_offset + 4, address >> 32)
 
-    def inspect(self) -> dict[str, int]:
+    def read_counter64(self, low_offset: int) -> int:
+        """Read a free-running 64-bit register without a torn rollover."""
+        while True:
+            high_before = self.read_reg(
+                REG_SPACE_ACCELERATOR, low_offset + 4
+            )
+            low = self.read_reg(REG_SPACE_ACCELERATOR, low_offset)
+            high_after = self.read_reg(
+                REG_SPACE_ACCELERATOR, low_offset + 4
+            )
+            if high_before == high_after:
+                return (high_after << 32) | low
+
+    def performance_counters(self) -> dict[str, int]:
+        """Snapshot compute counters and completed DDR payload bytes."""
+        counters = {
+            "active_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_ACTIVE
+            ),
+            "issue_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_ISSUE
+            ),
+            "weight_stall_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_WEIGHT_STALL
+            ),
+            "activation_stall_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_ACT_STALL
+            ),
+            "result_stall_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_RESULT_STALL
+            ),
+            "useful_mac_count": self.read_counter64(REG_PERF_USEFUL_MAC_LO),
+            "peak_mac_slot_count": self.read_counter64(
+                REG_PERF_PEAK_MAC_LO
+            ),
+            "result_signature": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_SIGNATURE
+            ),
+            "completed_tiles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PERF_TILES
+            ),
+            "pipeline_total_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_TOTAL
+            ),
+            "pipeline_engine_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_ENGINE
+            ),
+            "pipeline_weight_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_WEIGHT
+            ),
+            "pipeline_patch_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_PATCH
+            ),
+            "pipeline_pool_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_POOL
+            ),
+            "pipeline_result_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_RESULT
+            ),
+            "pipeline_raster_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_RASTER
+            ),
+            "pipeline_dma_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_DMA
+            ),
+            "pipeline_overlap_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_OVERLAP
+            ),
+            "pipeline_idle_cycles": self.read_reg(
+                REG_SPACE_ACCELERATOR, REG_PIPELINE_IDLE
+            ),
+        }
+        counters.update(self.ddr_counters())
+        return counters
+
+    def ddr_counters(self) -> dict[str, int]:
+        """Snapshot cumulative bytes accepted by each DDR stream."""
         return {
+            "ddr_read_bytes": self.read_counter64(REG_DDR_READ_BYTES_LO),
+            "ddr_write_bytes": self.read_counter64(
+                REG_DDR_WRITE_BYTES_LO
+            ),
+            "main_read_bytes": self.read_counter64(REG_MAIN_READ_BYTES_LO),
+            "weight_read_bytes": self.read_counter64(
+                REG_WEIGHT_READ_BYTES_LO
+            ),
+            "camera_read_bytes": self.read_counter64(
+                REG_CAMERA_READ_BYTES_LO
+            ),
+        }
+
+    @staticmethod
+    def counter_delta(
+        before: dict[str, int], after: dict[str, int]
+    ) -> dict[str, int]:
+        """Return modulo-safe deltas for cumulative hardware counters."""
+        deltas: dict[str, int] = {}
+        for name, value in after.items():
+            width = 64 if name.endswith("_bytes") or name.endswith("_count") else 32
+            deltas[name] = (value - before[name]) & ((1 << width) - 1)
+        return deltas
+
+    def inspect(self) -> dict[str, int]:
+        identity = {
             "id": self.read_reg(REG_SPACE_ACCELERATOR, REG_ID),
             "status": self.read_reg(REG_SPACE_ACCELERATOR, REG_STATUS),
             "progress": self.read_reg(REG_SPACE_ACCELERATOR, REG_PROGRESS),
@@ -221,6 +352,8 @@ class AlexNetBoard:
             "pl_clock_hz": self.pl_clock_hz,
             "pl_input_clock_hz": self.pl_input_clock_hz,
         }
+        identity.update(self.performance_counters())
+        return identity
 
     def require_identity(self) -> None:
         identity = self.read_reg(REG_SPACE_ACCELERATOR, REG_ID)
@@ -269,7 +402,7 @@ class AlexNetBoard:
             PARAMETERS_BYTES,
             EXPECTED_PARAMETER_SHA256,
         )
-        if len(manifest.get("categories", [])) != OUTPUT_VALID_BYTES:
+        if len(manifest.get("categories", [])) != OUTPUT_IMAGE_BYTES:
             raise BoardError("board manifest does not contain 1,000 ImageNet categories")
         return manifest
 
@@ -290,10 +423,13 @@ class AlexNetBoard:
         if config_status & 0x7 != 0x7:
             raise BoardError(f"accelerator rejected buffer configuration: 0x{config_status:08x}")
 
-    def write_input(self, packed_frame: bytes) -> None:
+    def write_input(self, packed_frame: bytes, slot: int = 0) -> None:
         if len(packed_frame) != INPUT_BYTES:
             raise BoardError(f"camera frame has {len(packed_frame)} bytes, expected {INPUT_BYTES}")
-        self.memory[INPUT_OFFSET : INPUT_OFFSET + INPUT_BYTES] = packed_frame
+        if slot < 0 or slot >= BATCH_SIZE:
+            raise BoardError(f"batch slot {slot} is outside 0..{BATCH_SIZE - 1}")
+        offset = INPUT_OFFSET + slot * INPUT_BYTES
+        self.memory[offset : offset + INPUT_BYTES] = packed_frame
 
     def _reset_camera_dma(self, timeout_s: float = 0.1) -> None:
         self.write_reg(
@@ -325,11 +461,18 @@ class AlexNetBoard:
             REG_SPACE_CAMERA_DMA, AXIDMA_MM2S_LENGTH, INPUT_BYTES
         )
 
-    def infer(self, packed_frame: bytes, timeout_s: float = 10.0) -> bytes:
+    def infer_batch(
+        self, packed_frames: list[bytes], timeout_s: float = 30.0
+    ) -> list[bytes]:
+        if len(packed_frames) != BATCH_SIZE:
+            raise BoardError(
+                f"native batch requires {BATCH_SIZE} frames, got {len(packed_frames)}"
+            )
         status = self.read_reg(REG_SPACE_ACCELERATOR, REG_STATUS)
         if status & STATUS_BUSY:
             raise BoardError("accelerator is already busy")
-        self.write_input(packed_frame)
+        for slot, packed_frame in enumerate(packed_frames):
+            self.write_input(packed_frame, slot)
         self.memory[OUTPUT_OFFSET : OUTPUT_OFFSET + OUTPUT_ALLOC_BYTES] = bytes(
             OUTPUT_ALLOC_BYTES
         )
@@ -340,25 +483,13 @@ class AlexNetBoard:
         self.job_tag = (self.job_tag + 1) & 0xFFFF
         self.write_reg(REG_SPACE_ACCELERATOR, REG_JOB_TAG, self.job_tag)
 
-        # One camera-DMA launch fills the PL UltraRAM frame cache. The cache
-        # replays the retained 224x224 RGB tensor for all eight Conv1 N8 output
-        # tiles, eliminating seven DDR reads and seven PS-side DMA restarts.
-        # Starting MM2S first is safe: AXI-Stream backpressure holds its first
-        # pixel until the submitted graph arms the cache.
-        self._start_camera_dma()
+        # The M8xN126 graph fetches Conv1 pixels through its main HP0 DMA.
+        # The separate camera stream is a sink in this bitstream, so launching
+        # it would only add a redundant INPUT_BYTES DDR read per inference.
         self.write_reg(REG_SPACE_ACCELERATOR, REG_CONTROL, CONTROL_SUBMIT)
 
         deadline = time.monotonic() + timeout_s
-        camera_done = False
         while True:
-            camera_status = self.read_reg(
-                REG_SPACE_CAMERA_DMA, AXIDMA_MM2S_DMASR
-            )
-            if camera_status & (AXIDMA_DMASR_ERROR_MASK | AXIDMA_DMASR_ERR_IRQ):
-                raise BoardError(f"camera DMA failed: 0x{camera_status:08x}")
-            camera_done = camera_done or bool(
-                camera_status & AXIDMA_DMASR_IOC_IRQ
-            )
             status = self.read_reg(REG_SPACE_ACCELERATOR, REG_STATUS)
             if status & (STATUS_FAILED | STATUS_FAULT | STATUS_DMA_ERROR):
                 progress = self.read_reg(REG_SPACE_ACCELERATOR, REG_PROGRESS)
@@ -374,13 +505,27 @@ class AlexNetBoard:
                     f"progress=0x{progress:08x} error=0x{error:08x} "
                     f"fault_sources={sources}"
                 )
-            if status & STATUS_DONE and camera_done:
+            if status & STATUS_DONE:
                 break
             if time.monotonic() >= deadline:
                 progress = self.read_reg(REG_SPACE_ACCELERATOR, REG_PROGRESS)
                 raise BoardError(
                     f"inference timed out: status=0x{status:08x} "
-                    f"camera=0x{camera_status:08x} progress=0x{progress:08x}"
+                    f"progress=0x{progress:08x}"
                 )
             time.sleep(0.001)
-        return bytes(self.memory[OUTPUT_OFFSET : OUTPUT_OFFSET + OUTPUT_VALID_BYTES])
+        raw = self.memory[OUTPUT_OFFSET : OUTPUT_OFFSET + OUTPUT_VALID_BYTES]
+        logits = [bytearray(OUTPUT_IMAGE_BYTES) for _ in range(BATCH_SIZE)]
+        # FC8 is written [N8 tile][batch image][8 output lanes].
+        for channel_tile in range(OUTPUT_IMAGE_BYTES // 8):
+            for slot in range(BATCH_SIZE):
+                source = (channel_tile * BATCH_SIZE + slot) * 8
+                destination = channel_tile * 8
+                logits[slot][destination : destination + 8] = raw[
+                    source : source + 8
+                ]
+        return [bytes(values) for values in logits]
+
+    def infer(self, packed_frame: bytes, timeout_s: float = 30.0) -> bytes:
+        """Compatibility helper: repeat one image across the native batch."""
+        return self.infer_batch([packed_frame] * BATCH_SIZE, timeout_s)[0]

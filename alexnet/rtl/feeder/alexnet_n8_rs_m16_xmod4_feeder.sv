@@ -81,8 +81,10 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
     ST_WAIT_DATA,
     ST_READ_ISSUE,
     ST_READ_WAIT,
+    ST_READ_PIPE,
     ST_READ_SECOND,
     ST_READ_SECOND_WAIT,
+    ST_READ_FIRST_CAPTURE,
     ST_READ_CAPTURE,
     ST_EMIT,
     ST_DRAIN_SCAN
@@ -122,9 +124,10 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
   logic prefetch_valid_q;
 
   logic [63:0] bank_read_q [0:WORD_BANKS-1][0:XMOD4_PLANES-1];
-  logic [63:0] bank_plane_data [0:WORD_BANKS-1];
+  logic [63:0] bank_plane_q [0:WORD_BANKS-1];
   logic [63:0] lane_read_data [0:M_GROUP-1];
   logic [3:0] capture_bank_q [0:M_GROUP-1];
+  logic [3:0] data_bank_q [0:M_GROUP-1];
   logic [1:0] capture_plane_q;
   logic read_cmd_valid_q;
   logic [1:0] read_cmd_plane_q;
@@ -148,7 +151,6 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
   logic [DIM_W:0] group_advance_x_sum;
   logic [DIM_W:0] planned_next_group_y;
   logic [DIM_W-1:0] planned_next_group_x;
-  logic planned_group_is_last;
   logic [DIM_W-1:0] planned_endpoint_y, planned_endpoint_x;
 
   logic [DIM_W:0] endpoint_row_lag;
@@ -243,7 +245,6 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
       planned_next_group_y = group_y_q;
       planned_next_group_x = group_advance_x_sum[DIM_W-1:0];
     end
-    planned_group_is_last = planned_next_group_y >= output_h_q;
   end
 
   assign group_data_available = scan_complete_q ||
@@ -294,9 +295,9 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
                             prefetch_phase_q == 1 && group_crosses_row_q;
     prefetch_complete_now = state_q == ST_EMIT &&
                             ((!group_crosses_row_q &&
-                              prefetch_phase_q == 2) ||
+                              prefetch_phase_q == 3) ||
                              (group_crosses_row_q &&
-                              prefetch_phase_q == 3));
+                              prefetch_phase_q == 4));
     memory_read_issue = state_q == ST_READ_ISSUE ||
                         state_q == ST_READ_SECOND ||
                         prefetch_first_issue || prefetch_second_issue;
@@ -399,14 +400,19 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
     end
   endgenerate
 
-  // Share one plane-select and one bank-select fabric across all FSM capture
-  // paths.  Keeping the dynamic indexing at this single boundary prevents
-  // synthesis from cloning a 64:1 data mux for each destination register.
-  always_comb begin
+  // Register the common plane selection before the per-lane bank selection.
+  // This cuts the BRAM-to-pixel path between its 4:1 and 16:1 muxes.  Delay
+  // the bank selector by the same cycle so consecutive row reads stay aligned.
+  always_ff @(posedge clk) begin
     for (int bank = 0; bank < WORD_BANKS; bank++)
-      bank_plane_data[bank] = bank_read_q[bank][capture_plane_q];
+      bank_plane_q[bank] <= bank_read_q[bank][capture_plane_q];
     for (int lane = 0; lane < M_GROUP; lane++)
-      lane_read_data[lane] = bank_plane_data[capture_bank_q[lane]];
+      data_bank_q[lane] <= capture_bank_q[lane];
+  end
+
+  always_comb begin
+    for (int lane = 0; lane < M_GROUP; lane++)
+      lane_read_data[lane] = bank_plane_q[data_bank_q[lane]];
   end
 
   always_comb begin
@@ -594,6 +600,10 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
         // row-crossing group also queues its second command back-to-back.
         prefetch_phase_q <= 2;
       end else if (prefetch_phase_q == 2) begin
+        // Allow the registered plane-selection cut to capture the first BRAM
+        // result before the lane values are consumed.
+        prefetch_phase_q <= 3;
+      end else if (prefetch_phase_q == 3) begin
         for (int lane = 0; lane < M_GROUP; lane++) begin
           if (lane < group_count_q && !lane_second_row_q[lane])
             prefetch_pixel_q[lane] <= lane_read_data[lane];
@@ -601,12 +611,12 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
             prefetch_pixel_q[lane] <= '0;
         end
         if (group_crosses_row_q)
-          prefetch_phase_q <= 3;
+          prefetch_phase_q <= 4;
         else begin
           prefetch_phase_q <= 0;
           prefetch_valid_q <= 1'b1;
         end
-      end else if (prefetch_phase_q == 3) begin
+      end else if (prefetch_phase_q == 4) begin
         for (int lane = 0; lane < M_GROUP; lane++) begin
           if (lane < group_count_q && lane_second_row_q[lane])
             prefetch_pixel_q[lane] <= lane_read_data[lane];
@@ -622,11 +632,14 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
           endpoint_group_x_q <= endpoint_group_x;
           next_group_y_q <= planned_next_group_y[DIM_W-1:0];
           next_group_x_q <= planned_next_group_x;
-          next_group_is_last_q <= planned_group_is_last;
           state_q <= ST_PLAN_ENDPOINT;
         end
 
         ST_PLAN_ENDPOINT: begin
+          // next_group_y_q was registered in ST_PLAN.  Resolve the final
+          // group flag here instead of extending the group-coordinate carry
+          // chain with another compare in the same 200 MHz cycle.
+          next_group_is_last_q <= next_group_y_q >= output_h_q;
           planned_endpoint_y_q <= planned_endpoint_y;
           planned_endpoint_x_q <= planned_endpoint_x;
           state_q <= ST_WAIT_DATA;
@@ -659,12 +672,18 @@ module alexnet_n8_rs_m16_xmod4_feeder #(
           state_q <= group_crosses_row_q ? ST_READ_SECOND : ST_READ_WAIT;
 
         ST_READ_WAIT:
+          state_q <= ST_READ_PIPE;
+
+        ST_READ_PIPE:
           state_q <= ST_READ_CAPTURE;
 
         ST_READ_SECOND:
           state_q <= ST_READ_SECOND_WAIT;
 
-        ST_READ_SECOND_WAIT: begin
+        ST_READ_SECOND_WAIT:
+          state_q <= ST_READ_FIRST_CAPTURE;
+
+        ST_READ_FIRST_CAPTURE: begin
           for (int lane = 0; lane < M_GROUP; lane++) begin
             if (lane < group_count_q && !lane_second_row_q[lane])
               pixel_q[lane] <= lane_read_data[lane];

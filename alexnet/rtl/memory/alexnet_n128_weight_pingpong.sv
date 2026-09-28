@@ -203,7 +203,15 @@ module alexnet_n128_weight_pingpong #(
                        set_context_tag_q[0] == release_context_tag;
     release_match[1] = set_state[1] == STATE_READY &&
                        set_context_tag_q[1] == release_context_tag;
-    selected_release_set = !release_match[0];
+    // FC K chunks for the same output tile deliberately share a context tag.
+    // While one set is replaying, look-ahead may therefore fill the other set
+    // with the same tag.  Release the set that serviced the just-completed
+    // replay; a fixed set-0 priority can otherwise discard the prefetched
+    // successor instead.
+    if (release_match[replay_set_q])
+      selected_release_set = replay_set_q;
+    else
+      selected_release_set = !release_match[0];
     release_ready = !replay_valid && |release_match;
 
     fill_fire = fill_valid && fill_ready;

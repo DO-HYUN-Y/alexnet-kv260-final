@@ -15,7 +15,8 @@
 module alexnet_sa_m4n8 #(
     parameter int PHYS_ROWS = 2,
     parameter int COLS = 8,
-    parameter int DSP_LATENCY = 4
+    parameter int DSP_LATENCY = 4,
+    parameter bit ACC_CLEAR_INDEPENDENT = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -190,7 +191,9 @@ module alexnet_sa_m4n8 #(
   generate
     for (genvar g = 0; g < PHYS_ROWS; g++) begin : g_pe_row
       for (genvar c = 0; c < COLS; c++) begin : g_pe_col
-        alexnet_packed_pe u_pe (
+        alexnet_packed_pe #(
+            .ACC_CLEAR_INDEPENDENT(ACC_CLEAR_INDEPENDENT)
+        ) u_pe (
             .clk,
             .rst,
             .ce,

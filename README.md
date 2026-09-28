@@ -4,9 +4,10 @@ This repository is the standalone AlexNet graph-integration project split
 from `DO-HYUN-Y/lenet5-kv260-final` at source checkpoint
 `56fb4a3947b65672aef36e09d89f29d4e25e7b66`.
 
-The current design implements the complete batch-one AlexNet Conv1-through-
-FC8 graph for the Kria KV260.  Its physical compute array is the packed
-M8xN128 design (512 DSP48E2 for the systolic array plus 64 DSP48E2 for
+The current design implements the complete AlexNet Conv1-through-FC8 graph
+for the Kria KV260, including a native batch-eight path that reuses Conv/FC
+weights across images.  Its physical compute array is the packed M8xN128
+design (512 DSP48E2 for the systolic array plus 64 DSP48E2 for
 requantization), with four PS HP ports exposed by the integrated platform.
 
 ## Verified checkpoint
@@ -22,9 +23,13 @@ requantization), with four PS HP ports exposed by the integrated platform.
   (39.09%), 96 BRAM tiles (66.67%), 40 URAMs (62.50%), and 576 DSP48E2s
   (46.15%).
 
-This checkpoint is simulation- and implementation-verified.  Physical-board
-throughput, stall counters, power, and TOPS/W still require a KV260 run; the
-Vivado vectorless 3.498 W estimate is not a measured board result.
+The native batch-eight image has also passed a physical KV260 functional and
+10-second sustained run at a measured 184.998151 MHz fabric clock.  It reached
+22.410 images/s, 0.032010 effective TOPS, 4.049 W mean SOM power, and 0.007906
+TOPS/W.  Accepted accelerator DMA payload traffic was 9,612,800 bytes/image,
+84.94% below the earlier host-sequential baseline.  See
+[`measurements/`](measurements/) for the exact scope, raw values, pending
+measurements, and reusable result format.
 
 ## Layout
 
@@ -36,6 +41,8 @@ Vivado vectorless 3.498 W estimate is not a measured board result.
 - `rtl/axi_dma_simple_master.sv`: shared AXI DMA master used by the integrated
   top;
 - `release/`: the timing-clean bitstream and fixed hardware handoff.
+- `measurements/`: board-measurement checklist, result index, and machine-
+  readable records.
 
 See [`alexnet/RTL_STATUS.md`](alexnet/RTL_STATUS.md) for the full verification
 record and

@@ -1,5 +1,26 @@
 `timescale 1ns/1ps
 
+module alexnet_conv_activation_bank64 #(
+    parameter int DEPTH = 507,
+    parameter int ADDR_W = $clog2(DEPTH)
+) (
+    input logic clk,
+    input logic write_enable,
+    input logic [ADDR_W-1:0] write_address,
+    input logic [63:0] write_data,
+    input logic read_enable,
+    input logic [ADDR_W-1:0] read_address,
+    output logic [63:0] read_data
+);
+  (* ram_style = "block" *) logic [63:0] memory [0:DEPTH-1];
+  always_ff @(posedge clk) begin
+    if (write_enable)
+      memory[write_address] <= write_data;
+    if (read_enable)
+      read_data <= memory[read_address];
+  end
+endmodule
+
 // Cache one completed activation tensor from DDR and assemble the exact
 // K-major M16 stream consumed by alexnet_m16_patch_pingpong.
 //
@@ -53,16 +74,23 @@ module alexnet_m8n126_activation_patch_service #(
     output logic [31:0] completed_patches,
     output logic [31:0] emitted_patch_words
 );
+  localparam int CACHE_BANKS = 16;
+  localparam int CACHE_BANK_DEPTH = (MAX_CACHE_BEATS + 7) / 8;
+  localparam int CACHE_BANK_ADDR_W = $clog2(CACHE_BANK_DEPTH);
+
   typedef enum logic [3:0] {
     ST_IDLE,
+    ST_VALIDATE,
     ST_LOAD_COMMAND,
     ST_LOAD_ARM,
     ST_LOAD_STREAM,
     ST_LOAD_DRAIN,
     ST_INIT_POSITION,
     ST_PREPARE_WORD,
+    ST_INPUT_COORD,
+    ST_SPATIAL_INDEX,
+    ST_WORD_INDEX,
     ST_ADDRESS,
-    ST_ASSEMBLE,
     ST_CAPTURE,
     ST_OUTPUT,
     ST_FAILED
@@ -70,28 +98,59 @@ module alexnet_m8n126_activation_patch_service #(
 
   state_t state_q;
   logic fault_q, cache_valid_q, dma_done_seen_q;
+  logic [31:0] cached_base_q;
   logic [3:0] layer_id_q;
+  logic [13:0] request_k_offset_q;
   logic [12:0] k_count_q, local_k_q;
   logic [15:0] m_lane_mask_q, context_tag_q;
-  logic [4:0] m_count_q, m_lane_index_q;
+  logic [4:0] m_count_q;
 
   logic [11:0] cache_write_index_q;
-  logic [11:0] cache_beat_index_q;
-  logic [127:0] cache_read_data_q;
-  logic [3:0] cache_read_byte_q;
   logic [127:0] patch_word_q;
 
   logic [9:0] conv_channel_q;
   logic [2:0] conv_kx_q, conv_ky_q;
   logic [12:0] position_remainder_q;
   logic [7:0] base_output_y_q, base_output_x_q;
-  logic [7:0] current_output_y_q, current_output_x_q;
   logic [8:0] fc_channel_q;
   logic [5:0] fc_spatial_q;
   logic [12:0] fc_linear_q;
 
-  (* ram_style = "block" *) logic [127:0] activation_cache
-      [0:MAX_CACHE_BEATS-1];
+  // Geometry and the 64-bit cache word for every M lane are registered before
+  // the BRAM address stage.  Keeping the per-lane coordinate work out of the
+  // BRAM address cone avoids a 16-lane carry/mux cascade after implementation.
+  logic [7:0] input_h_q, input_w_q;
+  logic [9:0] input_channels_q;
+  logic [3:0] kernel_q, padding_q;
+  logic layer_is_conv_q, layer_is_fc_q, layer_is_conv2_q;
+  logic [7:0] prepared_output_y [0:CACHE_BANKS-1];
+  logic [7:0] prepared_output_x [0:CACHE_BANKS-1];
+  logic [12:0] prepared_spatial_index [0:CACHE_BANKS-1];
+  logic [7:0] prepared_input_y [0:CACHE_BANKS-1];
+  logic [7:0] prepared_input_x [0:CACHE_BANKS-1];
+  logic [12:0] formed_spatial_index [0:CACHE_BANKS-1];
+  logic [12:0] prepared_word_index [0:CACHE_BANKS-1];
+  logic [2:0] prepared_byte [0:CACHE_BANKS-1];
+  logic prepared_valid [0:CACHE_BANKS-1];
+  logic [7:0] lane_output_y_q [0:CACHE_BANKS-1];
+  logic [7:0] lane_output_x_q [0:CACHE_BANKS-1];
+  logic [7:0] lane_input_y_q [0:CACHE_BANKS-1];
+  logic [7:0] lane_input_x_q [0:CACHE_BANKS-1];
+  logic [12:0] lane_spatial_index_q [0:CACHE_BANKS-1];
+  logic [12:0] lane_word_index_q [0:CACHE_BANKS-1];
+  logic [2:0] lane_byte_q [0:CACHE_BANKS-1];
+  logic lane_valid_q [0:CACHE_BANKS-1];
+
+  logic [CACHE_BANK_ADDR_W-1:0] bank_read_address [0:CACHE_BANKS-1];
+  logic [63:0] bank_read_data_q [0:CACHE_BANKS-1];
+  logic [3:0] bank_lane [0:CACHE_BANKS-1];
+  logic [3:0] bank_lane_q [0:CACHE_BANKS-1];
+  logic [2:0] bank_byte [0:CACHE_BANKS-1];
+  logic [2:0] bank_byte_q [0:CACHE_BANKS-1];
+  logic bank_valid [0:CACHE_BANKS-1];
+  logic bank_valid_q [0:CACHE_BANKS-1];
+  logic [3:0] cache_write_low_bank, cache_write_high_bank;
+  logic [CACHE_BANK_ADDR_W-1:0] cache_write_bank_address;
 
   logic [7:0] input_h, input_w, output_w;
   logic [12:0] input_spatial;
@@ -101,17 +160,6 @@ module alexnet_m8n126_activation_patch_service #(
   logic [25:0] configured_bytes;
   logic [11:0] configured_beats;
   logic layer_is_conv, layer_is_fc;
-
-  logic signed [9:0] input_y_signed, input_x_signed;
-  logic coordinate_valid, lane_active, cache_read_valid;
-  logic [31:0] spatial_index;
-  logic [31:0] cache_word_index;
-  logic [9:0] conv_input_y, conv_input_x;
-  logic [6:0] conv_channel_tile;
-  logic [5:0] fc_channel_tile;
-  logic [31:0] conv_channel_tile_wide, fc_channel_tile_wide;
-  logic [11:0] cache_beat_index;
-  logic [3:0] cache_byte_index;
 
   logic request_fire, command_fire, input_fire, patch_fire;
   logic expected_input_last, request_fields_valid;
@@ -148,6 +196,9 @@ module alexnet_m8n126_activation_patch_service #(
   assign input_fire = s_axis_tvalid && s_axis_tready;
   assign expected_input_last = cache_write_index_q + 1'b1 ==
                                configured_beats;
+  assign cache_write_low_bank = {cache_write_index_q[2:0], 1'b0};
+  assign cache_write_high_bank = {cache_write_index_q[2:0], 1'b1};
+  assign cache_write_bank_address = cache_write_index_q[11:3];
 
   assign patch_axis_tdata = patch_word_q;
   assign patch_axis_tvalid = state_q == ST_OUTPUT;
@@ -217,98 +268,185 @@ module alexnet_m8n126_activation_patch_service #(
   end
 
   always_comb begin
-    request_fields_valid = request_layer_id >= 2 && request_layer_id <= 8 &&
-        request_m_lane_mask != 0 &&
-        request_m_lane_mask == ((17'b1 << requested_m_count) - 1'b1) &&
-        request_k_count != 0 && activation_a_base[3:0] == 0 &&
+    request_fields_valid = layer_id_q >= 2 && layer_id_q <= 8 &&
+        m_lane_mask_q != 0 &&
+        m_lane_mask_q == ((17'b1 << m_count_q) - 1'b1) &&
+        k_count_q != 0 && activation_a_base[3:0] == 0 &&
         activation_b_base[3:0] == 0;
-    case (request_layer_id)
-      2: request_fields_valid &= request_k_offset == 0 &&
-          request_k_count == 1600 && requested_m_count <= 16 &&
-          request_m_base + requested_m_count <= 729;
-      3: request_fields_valid &= request_k_offset == 0 &&
-          request_k_count == 1728 && requested_m_count <= 8 &&
-          request_m_base + requested_m_count <= 169;
-      4: request_fields_valid &= request_k_offset == 0 &&
-          request_k_count == 3456 && requested_m_count <= 8 &&
-          request_m_base + requested_m_count <= 169;
-      5: request_fields_valid &= request_k_offset == 0 &&
-          request_k_count == 2304 && requested_m_count <= 8 &&
-          request_m_base + requested_m_count <= 169;
-      6: request_fields_valid &= requested_m_count == 1 &&
-          request_m_base == 0 &&
-          ((request_k_offset == 0 && request_k_count == 4096) ||
-           (request_k_offset == 4096 && request_k_count == 4096) ||
-           (request_k_offset == 8192 && request_k_count == 1024));
-      7, 8: request_fields_valid &= requested_m_count == 1 &&
-          request_m_base == 0 && request_k_offset == 0 &&
-          request_k_count == 4096;
+    case (layer_id_q)
+      2: request_fields_valid &= request_k_offset_q == 0 &&
+          k_count_q == 1600 && m_count_q <= 16 &&
+          position_remainder_q + m_count_q <= 729;
+      3: request_fields_valid &= request_k_offset_q == 0 &&
+          k_count_q == 1728 && m_count_q <= 8 &&
+          position_remainder_q + m_count_q <= 169;
+      4: request_fields_valid &= request_k_offset_q == 0 &&
+          k_count_q == 3456 && m_count_q <= 8 &&
+          position_remainder_q + m_count_q <= 169;
+      5: request_fields_valid &= request_k_offset_q == 0 &&
+          k_count_q == 2304 && m_count_q <= 8 &&
+          position_remainder_q + m_count_q <= 169;
+      6: request_fields_valid &= m_count_q == 1 &&
+          position_remainder_q == 0 &&
+          ((request_k_offset_q == 0 && k_count_q == 4096) ||
+           (request_k_offset_q == 4096 && k_count_q == 4096) ||
+           (request_k_offset_q == 8192 && k_count_q == 1024));
+      7, 8: request_fields_valid &= m_count_q == 1 &&
+          position_remainder_q == 0 && request_k_offset_q == 0 &&
+          k_count_q == 4096;
       default: request_fields_valid = 1'b0;
     endcase
   end
 
-  always_comb begin
-    input_y_signed = $signed({1'b0, current_output_y_q}) +
-                     $signed({7'd0, conv_ky_q}) -
-                     $signed({6'd0, padding});
-    input_x_signed = $signed({1'b0, current_output_x_q}) +
-                     $signed({7'd0, conv_kx_q}) -
-                     $signed({6'd0, padding});
-    coordinate_valid = input_y_signed >= 0 && input_y_signed < input_h &&
-                       input_x_signed >= 0 && input_x_signed < input_w;
-    lane_active = m_lane_index_q < m_count_q &&
-                  m_lane_mask_q[m_lane_index_q];
+  always_comb begin : form_lane_positions
+    integer lane_index;
+    logic [8:0] lane_linear_x;
 
-    spatial_index = 0;
-    cache_word_index = 0;
-    cache_byte_index = 0;
-    conv_input_y = $unsigned(input_y_signed);
-    conv_input_x = $unsigned(input_x_signed);
-    conv_channel_tile = conv_channel_q[9:3];
-    fc_channel_tile = fc_channel_q[8:3];
-    conv_channel_tile_wide = {25'd0, conv_channel_tile};
-    fc_channel_tile_wide = {26'd0, fc_channel_tile};
-    if (layer_is_conv) begin
-      case (layer_id_q)
-        2: begin
-          // 27*y and 729*channel_tile, written as shift/add so that
-          // activation address generation never consumes a DSP48E2.
-          spatial_index = (conv_input_y << 4) +
-                          (conv_input_y << 3) +
-                          (conv_input_y << 1) + conv_input_y +
-                          conv_input_x;
-          cache_word_index = (conv_channel_tile_wide << 9) +
-                             (conv_channel_tile_wide << 7) +
-                             (conv_channel_tile_wide << 6) +
-                             (conv_channel_tile_wide << 4) +
-                             (conv_channel_tile_wide << 3) +
-                             conv_channel_tile_wide + spatial_index;
-        end
-        default: begin
-          // 13*y and 169*channel_tile.
-          spatial_index = (conv_input_y << 3) +
-                          (conv_input_y << 2) + conv_input_y +
-                          conv_input_x;
-          cache_word_index = (conv_channel_tile_wide << 7) +
-                             (conv_channel_tile_wide << 5) +
-                             (conv_channel_tile_wide << 3) +
-                             conv_channel_tile_wide + spatial_index;
-        end
-      endcase
-      cache_byte_index = {cache_word_index[0], conv_channel_q[2:0]};
-    end else if (layer_id_q == 6) begin
-      // 36*channel_tile = 32*channel_tile + 4*channel_tile.
-      cache_word_index = (fc_channel_tile_wide << 5) +
-                         (fc_channel_tile_wide << 2) + fc_spatial_q;
-      cache_byte_index = {cache_word_index[0], fc_channel_q[2:0]};
-    end else begin
-      cache_word_index = fc_linear_q >> 3;
-      cache_byte_index = fc_linear_q[3:0];
+    for (lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+      lane_linear_x = {1'b0, base_output_x_q} + lane_index;
+      prepared_output_y[lane_index] = base_output_y_q;
+      prepared_output_x[lane_index] = lane_linear_x[7:0];
+      if (lane_linear_x >= ({1'b0, input_w_q} << 1)) begin
+        prepared_output_y[lane_index] = base_output_y_q + 2;
+        prepared_output_x[lane_index] =
+            lane_linear_x - ({1'b0, input_w_q} << 1);
+      end else if (lane_linear_x >= {1'b0, input_w_q}) begin
+        prepared_output_y[lane_index] = base_output_y_q + 1'b1;
+        prepared_output_x[lane_index] =
+            lane_linear_x - {1'b0, input_w_q};
+      end
     end
-    cache_beat_index = cache_word_index[12:1];
-    cache_read_valid = lane_active &&
-        (layer_is_fc || coordinate_valid);
   end
+
+  always_comb begin : form_input_coordinates
+    integer lane_index;
+    logic [8:0] padded_y;
+    logic [8:0] padded_x;
+    logic [7:0] input_y_value;
+    logic [7:0] input_x_value;
+
+    for (lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+      prepared_spatial_index[lane_index] = '0;
+      prepared_input_y[lane_index] = '0;
+      prepared_input_x[lane_index] = '0;
+      prepared_byte[lane_index] = '0;
+      prepared_valid[lane_index] = 1'b0;
+      padded_y = {1'b0, lane_output_y_q[lane_index]} + conv_ky_q;
+      padded_x = {1'b0, lane_output_x_q[lane_index]} + conv_kx_q;
+      input_y_value = padded_y - padding_q;
+      input_x_value = padded_x - padding_q;
+      if (layer_is_conv_q) begin
+        if (lane_index < m_count_q && m_lane_mask_q[lane_index] &&
+            padded_y >= padding_q &&
+            padded_y < ({1'b0, padding_q} + input_h_q) &&
+            padded_x >= padding_q &&
+            padded_x < ({1'b0, padding_q} + input_w_q)) begin
+          prepared_input_y[lane_index] = input_y_value;
+          prepared_input_x[lane_index] = input_x_value;
+          prepared_byte[lane_index] = conv_channel_q[2:0];
+          prepared_valid[lane_index] = 1'b1;
+        end
+      end else if (lane_index == 0) begin
+        if (layer_id_q == 6) begin
+          prepared_spatial_index[lane_index] = fc_spatial_q;
+          prepared_byte[lane_index] = fc_channel_q[2:0];
+        end else begin
+          prepared_spatial_index[lane_index] = fc_linear_q >> 3;
+          prepared_byte[lane_index] = fc_linear_q[2:0];
+        end
+        prepared_valid[lane_index] = layer_is_fc_q;
+      end
+    end
+  end
+
+  always_comb begin : form_spatial_indices
+    for (integer lane_index = 0;
+         lane_index < CACHE_BANKS; lane_index++) begin
+      if (layer_is_conv2_q)
+        formed_spatial_index[lane_index] =
+            (lane_input_y_q[lane_index] << 4) +
+            (lane_input_y_q[lane_index] << 3) +
+            (lane_input_y_q[lane_index] << 1) +
+            lane_input_y_q[lane_index] + lane_input_x_q[lane_index];
+      else
+        formed_spatial_index[lane_index] =
+            (lane_input_y_q[lane_index] << 3) +
+            (lane_input_y_q[lane_index] << 2) +
+            lane_input_y_q[lane_index] + lane_input_x_q[lane_index];
+    end
+  end
+
+  always_comb begin : form_word_indices
+    logic [6:0] channel_tile_value;
+    channel_tile_value = layer_is_conv_q ?
+        (conv_channel_q >> 3) : (fc_channel_q >> 3);
+    for (integer lane_index = 0;
+         lane_index < CACHE_BANKS; lane_index++) begin
+      prepared_word_index[lane_index] =
+          lane_spatial_index_q[lane_index];
+      if (layer_is_conv2_q)
+        prepared_word_index[lane_index] =
+            (channel_tile_value << 9) +
+            (channel_tile_value << 7) +
+            (channel_tile_value << 6) +
+            (channel_tile_value << 4) +
+            (channel_tile_value << 3) + channel_tile_value +
+            lane_spatial_index_q[lane_index];
+      else if (layer_is_conv_q)
+        prepared_word_index[lane_index] =
+            (channel_tile_value << 7) +
+            (channel_tile_value << 5) +
+            (channel_tile_value << 3) + channel_tile_value +
+            lane_spatial_index_q[lane_index];
+      else if (layer_id_q == 6)
+        prepared_word_index[lane_index] =
+            (channel_tile_value << 5) +
+            (channel_tile_value << 2) +
+            lane_spatial_index_q[lane_index];
+    end
+  end
+
+  always_comb begin : form_banked_addresses
+    integer lane_index;
+    integer bank_index;
+    logic [3:0] selected_bank;
+
+    for (bank_index = 0; bank_index < CACHE_BANKS; bank_index++) begin
+      bank_read_address[bank_index] = '0;
+      bank_lane[bank_index] = '0;
+      bank_byte[bank_index] = '0;
+      bank_valid[bank_index] = 1'b0;
+    end
+    for (lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+      selected_bank = lane_word_index_q[lane_index][3:0];
+      if (lane_valid_q[lane_index]) begin
+        bank_read_address[selected_bank] =
+            lane_word_index_q[lane_index][12:4];
+        bank_lane[selected_bank] = lane_index;
+        bank_byte[selected_bank] = lane_byte_q[lane_index];
+        bank_valid[selected_bank] = 1'b1;
+      end
+    end
+  end
+
+  generate
+    for (genvar bank_gen = 0; bank_gen < CACHE_BANKS; bank_gen++) begin : g_cache_bank
+      alexnet_conv_activation_bank64 #(
+          .DEPTH(CACHE_BANK_DEPTH), .ADDR_W(CACHE_BANK_ADDR_W)
+      ) u_bank (
+          .clk,
+          .write_enable(input_fire &&
+              (cache_write_low_bank == bank_gen ||
+               cache_write_high_bank == bank_gen)),
+          .write_address(cache_write_bank_address),
+          .write_data(cache_write_low_bank == bank_gen ?
+                      s_axis_tdata[63:0] : s_axis_tdata[127:64]),
+          .read_enable(state_q == ST_ADDRESS),
+          .read_address(bank_read_address[bank_gen]),
+          .read_data(bank_read_data_q[bank_gen])
+      );
+    end
+  endgenerate
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -316,18 +454,16 @@ module alexnet_m8n126_activation_patch_service #(
       fault_q <= 1'b0;
       cache_valid_q <= 1'b0;
       cached_layer_id <= 0;
+      cached_base_q <= 0;
       dma_done_seen_q <= 1'b0;
       layer_id_q <= 0;
+      request_k_offset_q <= 0;
       k_count_q <= 0;
       local_k_q <= 0;
       m_lane_mask_q <= 0;
       context_tag_q <= 0;
       m_count_q <= 0;
-      m_lane_index_q <= 0;
       cache_write_index_q <= 0;
-      cache_beat_index_q <= 0;
-      cache_read_data_q <= 0;
-      cache_read_byte_q <= 0;
       patch_word_q <= 0;
       conv_channel_q <= 0;
       conv_kx_q <= 0;
@@ -335,11 +471,27 @@ module alexnet_m8n126_activation_patch_service #(
       position_remainder_q <= 0;
       base_output_y_q <= 0;
       base_output_x_q <= 0;
-      current_output_y_q <= 0;
-      current_output_x_q <= 0;
       fc_channel_q <= 0;
       fc_spatial_q <= 0;
       fc_linear_q <= 0;
+      input_h_q <= 0;
+      input_w_q <= 0;
+      input_channels_q <= 0;
+      kernel_q <= 0;
+      padding_q <= 0;
+      layer_is_conv_q <= 1'b0;
+      layer_is_fc_q <= 1'b0;
+      layer_is_conv2_q <= 1'b0;
+      for (int lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+        lane_output_y_q[lane_index] <= 0;
+        lane_output_x_q[lane_index] <= 0;
+        lane_input_y_q[lane_index] <= 0;
+        lane_input_x_q[lane_index] <= 0;
+        lane_spatial_index_q[lane_index] <= 0;
+        lane_word_index_q[lane_index] <= 0;
+        lane_byte_q[lane_index] <= 0;
+        lane_valid_q[lane_index] <= 1'b0;
+      end
       cache_loads <= 0;
       completed_patches <= 0;
       emitted_patch_words <= 0;
@@ -349,12 +501,12 @@ module alexnet_m8n126_activation_patch_service #(
 
       if (request_fire) begin
         layer_id_q <= request_layer_id;
+        request_k_offset_q <= request_k_offset;
         k_count_q <= request_k_count;
         local_k_q <= 0;
         m_lane_mask_q <= request_m_lane_mask;
         context_tag_q <= request_context_tag;
         m_count_q <= requested_m_count;
-        m_lane_index_q <= 0;
         conv_channel_q <= 0;
         conv_kx_q <= 0;
         conv_ky_q <= 0;
@@ -377,6 +529,10 @@ module alexnet_m8n126_activation_patch_service #(
         position_remainder_q <= request_m_base;
         base_output_y_q <= 0;
         base_output_x_q <= 0;
+        state_q <= ST_VALIDATE;
+      end
+
+      if (state_q == ST_VALIDATE) begin
         if (!request_fields_valid) begin
           fault_q <= 1'b1;
           state_q <= ST_FAILED;
@@ -386,12 +542,21 @@ module alexnet_m8n126_activation_patch_service #(
       end
 
       if (state_q == ST_INIT_POSITION) begin
+        input_h_q <= input_h;
+        input_w_q <= input_w;
+        input_channels_q <= input_channels;
+        kernel_q <= kernel;
+        padding_q <= padding;
+        layer_is_conv_q <= layer_is_conv;
+        layer_is_fc_q <= layer_is_fc;
+        layer_is_conv2_q <= layer_id_q == 2;
         if (layer_is_conv && position_remainder_q >= input_w) begin
           position_remainder_q <= position_remainder_q - input_w;
           base_output_y_q <= base_output_y_q + 1'b1;
         end else begin
           base_output_x_q <= position_remainder_q[7:0];
-          if (cache_valid_q && cached_layer_id == layer_id_q) begin
+          if (cache_valid_q && cached_layer_id == layer_id_q &&
+              cached_base_q == configured_base) begin
             state_q <= ST_PREPARE_WORD;
           end else begin
             cache_valid_q <= 1'b0;
@@ -411,7 +576,6 @@ module alexnet_m8n126_activation_patch_service #(
         state_q <= ST_LOAD_STREAM;
 
       if (input_fire) begin
-        activation_cache[cache_write_index_q] <= s_axis_tdata;
         cache_write_index_q <= cache_write_index_q + 1'b1;
         if (s_axis_tkeep != 16'hffff ||
             s_axis_tlast != expected_input_last)
@@ -420,6 +584,7 @@ module alexnet_m8n126_activation_patch_service #(
           if (dma_done_seen_q || dma_done) begin
             cache_valid_q <= 1'b1;
             cached_layer_id <= layer_id_q;
+            cached_base_q <= configured_base;
             cache_loads <= cache_loads + 1'b1;
             state_q <= ST_PREPARE_WORD;
           end else begin
@@ -432,60 +597,64 @@ module alexnet_m8n126_activation_patch_service #(
         dma_done_seen_q <= 1'b0;
         cache_valid_q <= 1'b1;
         cached_layer_id <= layer_id_q;
+        cached_base_q <= configured_base;
         cache_loads <= cache_loads + 1'b1;
         state_q <= ST_PREPARE_WORD;
       end
 
       if (state_q == ST_PREPARE_WORD) begin
         patch_word_q <= 0;
-        m_lane_index_q <= 0;
-        current_output_y_q <= base_output_y_q;
-        current_output_x_q <= base_output_x_q;
+        for (int lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+          lane_output_y_q[lane_index] <= prepared_output_y[lane_index];
+          lane_output_x_q[lane_index] <= prepared_output_x[lane_index];
+        end
+        state_q <= ST_INPUT_COORD;
+      end
+
+      if (state_q == ST_INPUT_COORD) begin
+        for (int lane_index = 0; lane_index < CACHE_BANKS; lane_index++) begin
+          lane_input_y_q[lane_index] <= prepared_input_y[lane_index];
+          lane_input_x_q[lane_index] <= prepared_input_x[lane_index];
+          lane_spatial_index_q[lane_index] <=
+              prepared_spatial_index[lane_index];
+          lane_byte_q[lane_index] <= prepared_byte[lane_index];
+          lane_valid_q[lane_index] <= prepared_valid[lane_index];
+        end
+        state_q <= ST_SPATIAL_INDEX;
+      end
+
+      if (state_q == ST_SPATIAL_INDEX) begin
+        if (layer_is_conv_q)
+          for (int lane_index = 0;
+               lane_index < CACHE_BANKS; lane_index++)
+            lane_spatial_index_q[lane_index] <=
+                formed_spatial_index[lane_index];
+        state_q <= ST_WORD_INDEX;
+      end
+
+      if (state_q == ST_WORD_INDEX) begin
+        for (int lane_index = 0; lane_index < CACHE_BANKS; lane_index++)
+          lane_word_index_q[lane_index] <= prepared_word_index[lane_index];
         state_q <= ST_ADDRESS;
       end
 
       if (state_q == ST_ADDRESS) begin
-        if (cache_read_valid) begin
-          cache_beat_index_q <= cache_beat_index;
-          cache_read_byte_q <= cache_byte_index;
-          state_q <= ST_ASSEMBLE;
-        end else if (m_lane_index_q + 1'b1 >= m_count_q) begin
-          state_q <= ST_OUTPUT;
-        end else begin
-          m_lane_index_q <= m_lane_index_q + 1'b1;
-          if (layer_is_conv) begin
-            if (current_output_x_q + 1'b1 >= input_w) begin
-              current_output_x_q <= 0;
-              current_output_y_q <= current_output_y_q + 1'b1;
-            end else begin
-              current_output_x_q <= current_output_x_q + 1'b1;
-            end
-          end
+        for (int bank_index = 0; bank_index < CACHE_BANKS; bank_index++) begin
+          bank_lane_q[bank_index] <= bank_lane[bank_index];
+          bank_byte_q[bank_index] <= bank_byte[bank_index];
+          bank_valid_q[bank_index] <= bank_valid[bank_index];
         end
-      end
-
-      if (state_q == ST_ASSEMBLE) begin
-          cache_read_data_q <= activation_cache[cache_beat_index_q];
-          state_q <= ST_CAPTURE;
+        state_q <= ST_CAPTURE;
       end
 
       if (state_q == ST_CAPTURE) begin
-        patch_word_q[m_lane_index_q*8 +: 8] <=
-            cache_read_data_q[cache_read_byte_q*8 +: 8];
-        if (m_lane_index_q + 1'b1 >= m_count_q)
-          state_q <= ST_OUTPUT;
-        else begin
-          m_lane_index_q <= m_lane_index_q + 1'b1;
-          if (layer_is_conv) begin
-            if (current_output_x_q + 1'b1 >= input_w) begin
-              current_output_x_q <= 0;
-              current_output_y_q <= current_output_y_q + 1'b1;
-            end else begin
-              current_output_x_q <= current_output_x_q + 1'b1;
-            end
-          end
-          state_q <= ST_ADDRESS;
+        patch_word_q <= 0;
+        for (int bank_index = 0; bank_index < CACHE_BANKS; bank_index++) begin
+          if (bank_valid_q[bank_index])
+            patch_word_q[bank_lane_q[bank_index]*8 +: 8] <=
+                bank_read_data_q[bank_index][bank_byte_q[bank_index]*8 +: 8];
         end
+        state_q <= ST_OUTPUT;
       end
 
       if (patch_fire) begin
@@ -496,11 +665,11 @@ module alexnet_m8n126_activation_patch_service #(
         end else begin
           local_k_q <= local_k_q + 1'b1;
           if (layer_is_conv) begin
-            if (conv_channel_q + 1'b1 < input_channels)
+            if (conv_channel_q + 1'b1 < input_channels_q)
               conv_channel_q <= conv_channel_q + 1'b1;
             else begin
               conv_channel_q <= 0;
-              if (conv_kx_q + 1'b1 < kernel)
+              if (conv_kx_q + 1'b1 < kernel_q)
                 conv_kx_q <= conv_kx_q + 1'b1;
               else begin
                 conv_kx_q <= 0;
@@ -533,9 +702,13 @@ module alexnet_m8n126_activation_patch_service #(
     if (!rst) begin
       if (input_fire && cache_write_index_q >= MAX_CACHE_BEATS)
         $fatal(1, "activation patch cache overflow");
-      if (state_q == ST_ADDRESS && cache_read_valid &&
-          cache_beat_index >= MAX_CACHE_BEATS)
-        $fatal(1, "activation patch cache read overflow");
+      if (state_q == ST_ADDRESS) begin
+        for (int bank_index = 0; bank_index < CACHE_BANKS; bank_index++) begin
+          if (bank_valid[bank_index] &&
+              bank_read_address[bank_index] >= CACHE_BANK_DEPTH)
+            $fatal(1, "activation patch cache bank read overflow");
+        end
+      end
       if (patch_fire && patch_axis_tlast &&
           emitted_patch_words + 1'b1 < k_count_q)
         $fatal(1, "activation patch service retired an early last");

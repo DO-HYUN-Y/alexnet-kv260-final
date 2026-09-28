@@ -1,6 +1,10 @@
 `timescale 1ns/1ps
 
-// Batch-one AlexNet work scheduler for the physical M8xN128 array.
+// AlexNet work scheduler for the physical M8xN128 array.  A launch selects a
+// contiguous layer range.  Batch-one uses layers 1..8 with FC M=1; the native
+// batch-eight controller first launches layers 1..5 for each image and then
+// launches layers 6..8 once with FC M=8 so every resident FC weight tile is
+// reused by all eight rows.
 //
 // Conv1/2 use the split 2xM8xN64 mode.  Conv3..5 use an N16-aligned logical
 // M8xN112 tile on the physical M8xN128 array.  FC6..8 use a
@@ -20,6 +24,14 @@ module alexnet_m8n126_graph_scheduler (
     input  logic start_valid,
     output logic start_ready,
     input  logic [15:0] start_tag,
+    input  logic [3:0] start_layer_id,
+    input  logic [3:0] stop_layer_id,
+    input  logic [3:0] fc_batch_size,
+    input  logic [15:0] start_n_base,
+    input  logic start_single_n_tile,
+    input  logic start_weight_fill_enable,
+    input  logic start_weight_release_enable,
+    input  logic start_pool_enable,
 
     output logic command_valid,
     input  logic command_ready,
@@ -41,6 +53,7 @@ module alexnet_m8n126_graph_scheduler (
     output logic command_weight_fill,
     output logic command_weight_release,
     output logic command_result_enable,
+    output logic command_layer_last,
     output logic [15:0] command_context_tag,
     output logic [15:0] command_tile_tag,
 
@@ -75,6 +88,9 @@ module alexnet_m8n126_graph_scheduler (
 
   state_t state_q;
   logic [3:0] layer_q;
+  logic [3:0] stop_layer_q, fc_batch_size_q;
+  logic single_n_tile_q, weight_fill_enable_q;
+  logic weight_release_enable_q, pool_enable_q;
   logic [15:0] inference_tag_q;
   logic [15:0] n_base_q;
   logic [12:0] m_base_q;
@@ -90,6 +106,7 @@ module alexnet_m8n126_graph_scheduler (
   logic [4:0] current_m_count;
   logic [12:0] current_k_count;
   logic n_last;
+  logic run_n_last;
   logic m_last;
   logic k_last;
   logic descriptor_valid;
@@ -101,8 +118,8 @@ module alexnet_m8n126_graph_scheduler (
   assign active_layer_id = layer_q;
   assign layer_complete_valid = state_q == ST_LAYER_WAIT;
   assign layer_complete_id = layer_q;
-  assign layer_complete_requires_pool = layer_q == 1 || layer_q == 2 ||
-                                        layer_q == 5;
+  assign layer_complete_requires_pool = pool_enable_q &&
+      (layer_q == 1 || layer_q == 2 || layer_q == 5);
 
   always_comb begin
     layer_n_total = 0;
@@ -132,16 +149,19 @@ module alexnet_m8n126_graph_scheduler (
         layer_k_total = 2304; layer_n_tile = 112; layer_m_tile = 8;
       end
       4'd6: begin
-        layer_n_total = 4096; layer_m_total = 1;
-        layer_k_total = 9216; layer_n_tile = 16;  layer_m_tile = 1;
+        layer_n_total = 4096; layer_m_total = fc_batch_size_q;
+        layer_k_total = 9216; layer_n_tile = 16;
+        layer_m_tile = {1'b0, fc_batch_size_q};
       end
       4'd7: begin
-        layer_n_total = 4096; layer_m_total = 1;
-        layer_k_total = 4096; layer_n_tile = 16;  layer_m_tile = 1;
+        layer_n_total = 4096; layer_m_total = fc_batch_size_q;
+        layer_k_total = 4096; layer_n_tile = 16;
+        layer_m_tile = {1'b0, fc_batch_size_q};
       end
       4'd8: begin
-        layer_n_total = 1000; layer_m_total = 1;
-        layer_k_total = 4096; layer_n_tile = 16;  layer_m_tile = 1;
+        layer_n_total = 1000; layer_m_total = fc_batch_size_q;
+        layer_k_total = 4096; layer_n_tile = 16;
+        layer_m_tile = {1'b0, fc_batch_size_q};
       end
       default: begin end
     endcase
@@ -166,6 +186,7 @@ module alexnet_m8n126_graph_scheduler (
       current_k_count = 13'd4096;
 
     n_last = n_base_q + current_n_count >= layer_n_total;
+    run_n_last = single_n_tile_q || n_last;
     m_last = m_base_q + current_m_count >= layer_m_total;
     k_last = k_offset_q + current_k_count >= layer_k_total;
 
@@ -185,9 +206,11 @@ module alexnet_m8n126_graph_scheduler (
     command_accum_first = k_offset_q == 0;
     command_accum_final = k_last;
     command_weight_fill = command_is_fc ||
-                          (m_base_q == 0 && k_offset_q == 0);
-    command_weight_release = command_is_fc || m_last;
+        (weight_fill_enable_q && m_base_q == 0 && k_offset_q == 0);
+    command_weight_release = command_is_fc ||
+        (weight_release_enable_q && m_last);
     command_result_enable = k_last;
+    command_layer_last = run_n_last && m_last && k_last;
     command_context_tag = inference_tag_q ^
         {4'b0, layer_q, n_base_q[7:0]};
     command_tile_tag = tile_tag_q;
@@ -231,6 +254,12 @@ module alexnet_m8n126_graph_scheduler (
     if (rst) begin
       state_q <= ST_IDLE;
       layer_q <= 0;
+      stop_layer_q <= 0;
+      fc_batch_size_q <= 1;
+      single_n_tile_q <= 1'b0;
+      weight_fill_enable_q <= 1'b1;
+      weight_release_enable_q <= 1'b1;
+      pool_enable_q <= 1'b1;
       inference_tag_q <= 0;
       n_base_q <= 0;
       m_base_q <= 0;
@@ -244,9 +273,15 @@ module alexnet_m8n126_graph_scheduler (
       inference_failed <= 1'b0;
       case (state_q)
         ST_IDLE: if (start_valid && start_ready) begin
-          layer_q <= 1;
+          layer_q <= start_layer_id;
+          stop_layer_q <= stop_layer_id;
+          fc_batch_size_q <= fc_batch_size;
+          single_n_tile_q <= start_single_n_tile;
+          weight_fill_enable_q <= start_weight_fill_enable;
+          weight_release_enable_q <= start_weight_release_enable;
+          pool_enable_q <= start_pool_enable;
           inference_tag_q <= start_tag;
-          n_base_q <= 0;
+          n_base_q <= start_n_base;
           m_base_q <= 0;
           k_offset_q <= 0;
           tile_tag_q <= start_tag;
@@ -274,24 +309,28 @@ module alexnet_m8n126_graph_scheduler (
           end else if (!m_last) begin
             k_offset_q <= 0;
             m_base_q <= m_base_q + current_m_count;
-          end else if (!n_last) begin
+          end else if (!run_n_last) begin
             k_offset_q <= 0;
             m_base_q <= 0;
             n_base_q <= n_base_q + current_n_count;
-          end else if (layer_q != 8) begin
+          end else if (layer_q != stop_layer_q || layer_q != 8) begin
             state_q <= ST_LAYER_WAIT;
           end else begin
             state_q <= ST_COMPLETE;
           end
-          if (!(n_last && m_last && k_last))
+          if (!(run_n_last && m_last && k_last))
             state_q <= ST_ISSUE;
         end
         ST_LAYER_WAIT: if (layer_complete_valid && layer_complete_ready) begin
-          layer_q <= layer_q + 1'b1;
-          k_offset_q <= 0;
-          m_base_q <= 0;
-          n_base_q <= 0;
-          state_q <= ST_ISSUE;
+          if (layer_q == stop_layer_q) begin
+            state_q <= ST_COMPLETE;
+          end else begin
+            layer_q <= layer_q + 1'b1;
+            k_offset_q <= 0;
+            m_base_q <= 0;
+            n_base_q <= 0;
+            state_q <= ST_ISSUE;
+          end
         end
         ST_COMPLETE: begin
           inference_done <= 1'b1;
@@ -309,7 +348,14 @@ module alexnet_m8n126_graph_scheduler (
       if (command_done && state_q != ST_WAIT)
         $fatal(1, "M8N126 graph scheduler received stray completion");
       if (command_valid && command_is_fc && command_bank_enable != 8'h01)
-        $fatal(1, "batch-one FC must enable exactly one N16 bank");
+        $fatal(1, "one-port FC must enable exactly one N16 bank");
+      if (start_valid && start_ready &&
+          (start_layer_id < 1 || start_layer_id > 8 ||
+           stop_layer_id < start_layer_id || stop_layer_id > 8 ||
+           fc_batch_size < 1 || fc_batch_size > 8 ||
+           (start_single_n_tile && start_layer_id >= 6) ||
+           start_n_base[3:0] != 0))
+        $fatal(1, "graph scheduler launch range/batch is invalid");
       if (command_valid && !command_is_fc &&
           !command_mode_split_n64 && command_n_lane_mask[7][15:14] != 0)
         $fatal(1, "logical N126 mask enabled physical lanes 126/127");

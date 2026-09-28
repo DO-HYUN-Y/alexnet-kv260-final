@@ -1,4 +1,4 @@
 all:
 {
-    [destination_device = pl] alexnet_m4n8_kv260.bit
+    [destination_device = pl] alexnet_m8n126_graph_kv260.bit
 }
