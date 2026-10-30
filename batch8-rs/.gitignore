@@ -1,0 +1,8 @@
+/build/
+/board_pure_rs/build/
+/measurements/paper_comparison/build/
+/.Xil/
+*.jou
+*.log
+__pycache__/
+*.pyc
